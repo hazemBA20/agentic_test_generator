@@ -1,0 +1,7 @@
+.schemathesis
+config.yaml
+spec.json   
+pytest.py
+test.py
+.hypothesis
+.env
