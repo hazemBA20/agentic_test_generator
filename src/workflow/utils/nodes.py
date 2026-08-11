@@ -10,7 +10,7 @@ from langchain_openrouter import ChatOpenRouter
 
 model = ChatOpenRouter(
     model="google/gemini-2.5-flash",
-    temperature=0.7,
+    temperature=0,
     max_tokens=4000,
 )
 
