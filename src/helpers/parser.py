@@ -23,16 +23,68 @@ def load_and_resolve_spec(spec_path: str) -> dict:
     return json.loads(json.dumps(resolved))
 
 
+import json
+
+
+def resolve_ref(spec: dict, ref: str) -> dict:
+    """Resolve a local JSON pointer like '#/components/schemas/ErrorType'."""
+    assert ref.startswith("#/"), f"Only local refs supported, got: {ref}"
+    node = spec
+    for part in ref.lstrip("#/").split("/"):
+        node = node[part]
+    return node
+
+
+def find_refs(node, refs: set) -> None:
+    """Recursively collect every unique $ref string found in a JSON structure."""
+    if isinstance(node, dict):
+        if isinstance(node.get("$ref"), str):
+            refs.add(node["$ref"])
+        for v in node.values():
+            find_refs(v, refs)
+    elif isinstance(node, list):
+        for item in node:
+            find_refs(item, refs)
+
+
+def extract_operation_with_refs(spec: dict, path: str, method: str, op: dict) -> dict:
+    """Return the raw operation (refs left intact) plus a de-duplicated
+    map of resolved definitions for every $ref it uses -- including refs
+    nested inside those definitions themselves."""
+    seen: set[str] = set()
+    to_process: set[str] = set()
+    find_refs(op, to_process)
+
+    definitions = {}
+    while to_process:
+        ref = to_process.pop()
+        if ref in seen:
+            continue
+        seen.add(ref)
+        resolved = resolve_ref(spec, ref)
+        definitions[ref] = resolved
+        nested = set()
+        find_refs(resolved, nested)
+        to_process |= (nested - seen)
+
+    return {
+        "path": path,
+        "method": method.upper(),
+        "operation": op,           # still has $ref pointers
+        "definitions": definitions,  # each unique referenced schema, resolved once
+    }
+
 
 def ingest_openapi_spec(spec_path: str) -> list[dict]:
-    spec = load_and_resolve_spec(spec_path)
-    operations = []
+    with open(spec_path, encoding="utf-8") as f:
+        spec = json.load(f)
 
+    operations = []
     for path, path_item in spec.get("paths", {}).items():
         for method, op in path_item.items():
             if method.lower() not in HTTP_METHODS:
                 continue
-            operations.append({"path": path, "method": method.upper(), **op})
+            operations.append(extract_operation_with_refs(spec, path, method, op))
 
     return operations
 def pretty_print_operations(operations: list[dict]) -> None:
@@ -73,4 +125,4 @@ if __name__ == "__main__":
     # pretty_print_operations(ops)
        
 
-    print(json.dumps(ops[3], indent=2))  # full resolved mission/add operation
+    print(json.dumps(ops[0]["definitions"], indent=2))  # full resolved mission/add operation
