@@ -17,7 +17,7 @@ class TestPlan(BaseModel):
     expected_response: dict[str, Any] | None = Field(None, description="Expected response body or key fields to assert on")
 
 
-    
+
 
 class TestPlans(BaseModel):
     test_plans: list[TestPlan] = Field(
@@ -28,3 +28,10 @@ class TestPlans(BaseModel):
 class State(TypedDict):
     operations: list[dict] | None
     plans: TestPlans | None
+
+
+class ScenarioSpec(BaseModel):
+    description: str = Field(..., description="Description of the scenario,'")
+
+class Scenarios(BaseModel):
+    scenarios: list[ScenarioSpec]
