@@ -26,5 +26,5 @@ class TestPlans(BaseModel):
 
 
 class State(TypedDict):
-    operation: str
+    operations: list[dict] | None
     plans: TestPlans | None

@@ -1,6 +1,11 @@
-def pretty_print_test_plans(test_plans: TestPlans)   -> None:
+from typing import List
+
+from src.workflow.utils.models import TestPlan
+
+
+def pretty_print_test_plans(test_plans: List[TestPlan]) -> None:
     """Pretty-print a list of TestPlan objects to the console."""
-    
+
     category_icons = {
         "happy_path": "✅",
         "negative": "❌",

@@ -5,3 +5,9 @@ pytest.py
 test.py
 .hypothesis
 .env
+src/workflow/__pycache__
+src/helpers/__pycache__
+src/workflow/utils/__pycache__
+src/__pycache__
+
+

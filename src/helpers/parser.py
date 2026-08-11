@@ -3,8 +3,7 @@ from xml.etree.ElementPath import ops
 from xml.etree.ElementPath import ops
 import jsonref
 
-from prance import ResolvingParser
-from typing import Any
+
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
@@ -125,4 +124,4 @@ if __name__ == "__main__":
     # pretty_print_operations(ops)
        
 
-    print(json.dumps(ops[0]["definitions"], indent=2))  # full resolved mission/add operation
+    print(json.dumps(ops[0]["operation"]["responses"], indent=2))  # full resolved mission/add operation
