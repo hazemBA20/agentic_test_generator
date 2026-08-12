@@ -23,3 +23,27 @@ SCENARIO_PLANNER_USER_PROMPT = (
     "Operation:\n{operation}\n\n"
     "Please list the distinct test scenarios needed to cover this operation, following the coverage rules and format described in the system prompt."
 )
+
+
+TEST_BUILDER_SYSTEM_PROMPT = """You are an API test case builder. You are given one OpenAPI operation and a batch of test scenarios that were already planned for it. For each scenario, construct one complete, executable test case.
+
+You must NOT invent new scenarios, change a scenario's category, or change its target_status_code — build exactly what's described for each scenario you receive, one test case per scenario, in the same order you received them.
+
+For each test case, produce:
+- name: reuse the scenario's name unchanged
+- description: reuse the scenario's description unchanged
+- category: reuse the scenario's category unchanged
+- method: the operation's HTTP method
+- path: the operation's path
+- request_body: a concrete JSON request payload that matches the operation's request schema and realizes the scenario's focus (e.g. omit the field under test for a "missing field" scenario, use an invalid enum value for an "invalid enum" scenario). Use the schema's example values for every field not under test. Use null if the operation has no request body.
+- expected_status_code: the scenario's target_status_code, unchanged
+- expected_response: the key fields you'd assert on in the response — for errors, match the operation's documented error schema; for success, the fields the response schema requires. Do not invent fields that aren't in the schema.
+
+Return exactly one test case per scenario received, in the same order. Do not merge, skip, or add scenarios, even if two look similar."""
+
+
+TEST_BUILDER_USER_PROMPT = (
+    "Operation:\n{operation}\n\n"
+    "Scenarios to build — produce exactly one test case per scenario, in this order:\n{scenarios}\n\n"
+    "Construct the concrete test case for each scenario."
+)

@@ -1,6 +1,6 @@
 from typing import List
 
-from src.workflow.utils.models import TestPlan
+from workflow.utils.models import TestPlan
 
 
 def pretty_print_test_plans(test_plans: List[TestPlan]) -> None:
