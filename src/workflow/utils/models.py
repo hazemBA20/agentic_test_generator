@@ -28,6 +28,14 @@ class TestPlan(BaseModel):
     expected_status_code: int = Field(..., description="Expected HTTP status code")
     expected_response: dict[str, Any] | None = Field(None, description="Expected response body or key fields to assert on")
 
+    # Not set by the LLM — backfilled deterministically from the operation itself,
+    # same as method/path, so the pytest runner knows how to send the request.
+    requires_api_key: bool = Field(True, description="Whether the X-API-KEY header must be attached")
+    requires_jwt: bool = Field(True, description="Whether the Authorization: Bearer <JWT> header must be attached")
+    content_type: Literal["application/json", "multipart/form-data"] = Field(
+        "application/json", description="Content-Type to send the request_body as"
+    )
+
 
 class TestPlans(BaseModel):
     test_plans: list[TestPlan] = Field(

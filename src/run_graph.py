@@ -25,6 +25,7 @@ def build_graph():
 
 def main(spec_path, index):
     operations = ingest_openapi_spec(spec_path)
+    # print(operations[0])
     if not operations:
         print("No operations found in spec.")
         sys.exit(1)
@@ -33,7 +34,7 @@ def main(spec_path, index):
     workflow = build_graph()
     state = workflow.invoke({"operations": [op]})
     for plan in state["plans"]:
-        print(f"[{plan.category}] {plan.name} -> {plan.method} {plan.path} (expect {plan.expected_status_code}) with {plan.request_body or 'no body'} -> expect {plan.expected_response or 'no response body'}  ")
+        print(f"[{plan.category}] {plan.name} -> {plan.method} {plan.path} (expect {plan.expected_status_code}) ")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate test plans from an OpenAPI spec.")
