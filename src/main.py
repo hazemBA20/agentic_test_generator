@@ -24,7 +24,8 @@ def build_graph():
 
 
 def run_one(workflow, op):
-    state = workflow.invoke({"operations": [op]})
+    state = workflow.invoke({"operations": [op]
+                             ,"out_path": str(ROOT / "src" / "helpers" / "test_plans.json")})
     return state.get("plans") or []
 
 
@@ -60,6 +61,6 @@ if __name__ == "__main__":
     parser.add_argument("--spec", default=str(ROOT / "spec.json"), help="Path to OpenAPI spec")
     parser.add_argument("--index", type=int, default=0, help="Index of the operation to plan (ignored with --all)")
     parser.add_argument("--all", action="store_true", help="Run every operation in the spec, not just --index")
-    parser.add_argument("--out", default=None, help="Path to write the combined test_plans.json")
+    parser.add_argument("--out", default=str(ROOT / "src" / "helpers" / "test_plans.json"), help="Path to write the combined test_plans.json")
     args = parser.parse_args()
     main(args.spec, args.index, args.all, args.out)

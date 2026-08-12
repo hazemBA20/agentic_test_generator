@@ -4,6 +4,7 @@ import os
 import random
 import time
 
+from anyio import Path
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openrouter import ChatOpenRouter
@@ -20,7 +21,7 @@ from workflow.utils.prompts import (
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-MODEL_NAME = "google/gemini-2.5-flash"
+MODEL_NAME = "deepseek/deepseek-v4-flash"
 
 model = ChatOpenRouter(
     model=MODEL_NAME,
@@ -33,20 +34,20 @@ model = ChatOpenRouter(
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GOOGLE_MODEL="gemini-3.1-flash-lite"
+GOOGLE_MODEL="gemini-3.6-flash"
 llm = ChatGoogleGenerativeAI(
     model=GOOGLE_MODEL,
      google_api_key=GEMINI_API_KEY,
     temperature=0.2,
-    max_output_tokens=8000,
+    max_output_tokens=7900,
 )
 
 
 
 
 
-scenario_planner = model.with_structured_output(Scenarios)
-test_builder = llm.with_structured_output(TestPlans)
+scenario_planner = llm.with_structured_output(Scenarios)
+test_builder = model.with_structured_output(TestPlans)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and
@@ -219,4 +220,15 @@ def call_llm_2(state: State) -> dict:
         return {"plans": []}
 
     all_plans = asyncio.run(_build_all(operations, scenarios_per_operation))
+    
     return {"plans": all_plans}
+
+# def create_test_file(state:State):
+#     """Write a Python test file with one function per TestPlan."""
+
+#     out_path = state.get("out_path")
+#     from helpers.generate_test_file import generate
+#     plans=state.get("plans", "")
+#     plans_path = Path(out_path).with_suffix(".json")
+#     plans_path.write_text(json.dumps([p.model_dump() for p in plans], indent=2, default=str), encoding="utf-8")
+#     generate(plans_path, Path(out_path))
