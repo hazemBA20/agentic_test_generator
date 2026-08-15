@@ -1,0 +1,22 @@
+{% macro assert_response_line(name, expected_response) -%}
+    assert_response(resp.json(), {{ expected_response|pyrepr }}, context={{ (name ~ ": ")|pyrepr }})
+{%- endmacro %}
+
+def {{ name }}():
+    """{{ description }}"""
+    resp = send_request(
+        method={{ method|pyrepr }},
+        path={{ path|pyrepr }},
+        request_body={{ request_body|pyrepr }},
+        content_type={{ content_type|pyrepr }},
+        requires_api_key={{ requires_api_key }},
+        requires_jwt={{ requires_jwt }},
+    )
+    assert resp.status_code == {{ expected_status_code|pyrepr }}, (
+        f"expected {{ expected_status_code|pyrepr }}, got {resp.status_code} — body: {resp.text}"
+    )
+{% if expected_response -%}
+{{ assert_response_line(name, expected_response) }}
+{%- else -%}
+    # no response body assertions for this scenario
+{%- endif %}
