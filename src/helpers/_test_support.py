@@ -2,19 +2,17 @@
 test.py imports these. Auth is lazy and cached: a JWT is only fetched the
 first time a test that actually needs one runs, so a login outage doesn't
 block tests (like /version) that don't require auth at all."""
-from asyncio.windows_events import NULL
 import os
 from pathlib import Path
 
-import pytest
 import requests
 
 BASE_URL = os.environ.get("API_BASE_URL", "https://test.expert.digiclaim.tn/api")
 API_KEY = os.environ.get("DIGIEXPERT_API_KEY")
-LOGIN_USERNAME = os.environ.get("DIGIEXPERT_USERNAME")  
+LOGIN_USERNAME = os.environ.get("DIGIEXPERT_USERNAME")
 LOGIN_PASSWORD = os.environ.get("DIGIEXPERT_PASSWORD")
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
+FIXTURES_DIR = Path(__file__).parent / "fixture"
 GENERATED_SENTINEL = "<GENERATED>"
 FILE_PREFIX = "<FILE:"
 FILE_SUFFIX = ">"
@@ -26,7 +24,7 @@ def _get_jwt() -> str:
     if "token" in _token_cache:
         return _token_cache["token"]
     if not (LOGIN_USERNAME and LOGIN_PASSWORD):
-        pytest.fail("DIGIEXPERT_USERNAME / DIGIEXPERT_PASSWORD not set — needed to obtain a JWT")
+        raise RuntimeError("DIGIEXPERT_USERNAME / DIGIEXPERT_PASSWORD not set — needed to obtain a JWT")
     resp = requests.post(
         f"{BASE_URL}/core/external/login",
         headers={"X-API-KEY": API_KEY},
@@ -81,17 +79,12 @@ def send_request(method: str, path: str, request_body, content_type: str,
     headers = {}
     if requires_api_key:
         if not API_KEY:
-            pytest.fail("DIGIEXPERT_API_KEY not set")
+            raise RuntimeError("DIGIEXPERT_API_KEY not set")
         headers["X-API-KEY"] = API_KEY
-        pass
     if requires_jwt:
-        pass
+        headers["Authorization"] = f"Bearer {_get_jwt()}"
 
     kwargs = {"method": method, "url": f"{BASE_URL}{path}", "headers": headers, "timeout": 15}
-    print("DEBUG URL:", kwargs["url"])
-    print("DEBUG METHOD:", kwargs["method"])
-    print("DEBUG HEADERS:", kwargs["headers"])
-    print("DEBUG BODY:", request_body)
     if content_type == "multipart/form-data":
         fields, files = split_multipart(request_body)
         kwargs["data"] = fields
