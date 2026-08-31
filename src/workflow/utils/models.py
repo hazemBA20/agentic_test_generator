@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 from typing import Any, Literal
 
-
 class ScenarioSpec(BaseModel):
     name: str = Field(..., description="Short snake_case identifier, prefixed with test_, e.g. 'test_mission_add_missing_expert_code'")
     category: Literal["happy_path", "negative", "boundary"] = Field(..., description="Type of test case")
@@ -20,7 +19,6 @@ class TestPlan(BaseModel):
     name: str = Field(..., description="Short snake_case test function name, e.g. 'test_mission_add_missing_expert_code'")
     description: str = Field(..., description="What this test verifies")
     category: Literal["happy_path", "negative", "boundary"] = Field(..., description="Type of test case")
-
     method: str = Field(..., description="HTTP method, e.g. 'POST'")
     path: str = Field(..., description="Endpoint path, e.g. '/experts/copilot/mission/add'")
     request_body: dict[str, Any] | None = Field(None, description="Request payload to send")
