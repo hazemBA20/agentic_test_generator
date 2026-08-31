@@ -1,7 +1,12 @@
 """Patch failed test plans using the live-run results from execute_plans.py.
 
-Only body/status failures are sent to the LLM. Auth/server errors are skipped.
-method, path, auth flags, content_type, and expected_status_code are never changed.
+Only body/status failures are sent to the LLM. Unexpected 401/403/5xx status
+mismatches are skipped; a test that *expected* 401/403 and got it (kind=body)
+can still get an assertion patch.
+
+method, path, auth flags, content_type, and expected_status_code are never
+changed. kind=body patches only expected_response; kind=status patches only
+request_body. Every skip/patch reason is written to rewrite_log.json for review.
 
 Usage (from this directory, after execute_plans.py):
     python rewrite_failed.py
@@ -24,64 +29,82 @@ load_dotenv()
 
 REWRITEABLE = {"body", "status"}
 INFRA_STATUSES = {401, 403, 500, 502, 503}
+REWRITE_BATCH_SIZE = 4
 
-SYSTEM_PROMPT = """You repair a single generated API test plan that failed against a live server.
+SYSTEM_PROMPT = """You repair generated API test plans that failed against a live server.
 
-The plan's intent must stay the same: same category, same condition under test, same expected_status_code.
+You receive a batch of failures. For each item, decide skip or patch. Return one
+entry per failure, using the plan's name unchanged.
+
+The plan's intent must stay the same: same category, same condition under test,
+same expected_status_code.
 
 Decide:
-- skip: the failure is not something a request/assertion tweak can honestly fix (auth, server bug, unreachable scenario, spec vs server disagreement you should not hide).
-- patch: adjust request_body and/or expected_response so the plan still tests the same condition, but matches real server behavior.
+- skip: the failure is not something a request/assertion tweak can honestly fix
+  (auth, server bug, unreachable scenario, spec vs server disagreement you should
+  not hide). Prefer skip over making a test pass by copying a buggy server.
+- patch: adjust ONE field so the plan still tests the same condition.
 
 Rules:
-- Prefer fixing expected_response when the status code was already correct (kind=body). Use the literal string "<GENERATED>" for volatile or free-text fields. Only assert exact values the server actually returned and that the scenario cares about.
-- Prefer fixing request_body when the status code was wrong (kind=status) and a different payload would realize the same scenario (missing field, invalid enum, etc.).
-- Do not change expected_status_code.
+- kind=body means the HTTP status already matched. Patch only expected_response.
+  Use the literal string "<GENERATED>" for volatile or free-text fields. Only
+  assert exact values the server actually returned AND that the scenario cares
+  about. Leave request_body null.
+- kind=status means the HTTP status was wrong. Patch only request_body so the
+  payload realizes the same scenario (missing field, invalid enum, etc.). Leave
+  expected_response null. Do not change expected_status_code.
 - Do not invent new scenarios.
-- Keep file-upload values as "<FILE:sample.pdf>" / "<FILE:sample.jpg>" when a binary field is required.
-- If you are not confident, skip.
+- Keep file-upload values as "<FILE:sample.pdf>" / "<FILE:sample.jpg>" when a
+  binary field is required.
+- If you are not confident, skip. Missing names are treated as skip.
 """
 
-USER_PROMPT = """Plan:
-{plan}
+USER_PROMPT = """Failures to review (one object per plan). Produce exactly one
+decision per name, same names, same order if possible:
 
-Failure:
-{failure}
-
-Return skip or a patch with the full new request_body and expected_response values to store on the plan.
+{batch}
 """
 
 
-class PlanPatch(BaseModel):
+class NamedPatch(BaseModel):
+    name: str = Field(..., description="Matches the failing plan's name")
     action: Literal["skip", "patch"] = Field(..., description="skip if this failure should not be auto-fixed")
     reason: str = Field(..., description="One sentence why you patched or skipped")
     request_body: dict[str, Any] | None = Field(
-        None, description="Full replacement request body when action=patch; null if the operation has no body"
+        None, description="Replacement request body when kind=status and action=patch; else null"
     )
     expected_response: dict[str, Any] | None = Field(
-        None, description="Full replacement response assertions when action=patch; null for status-only"
+        None, description="Replacement response assertions when kind=body and action=patch; else null"
     )
+
+
+class PatchBatch(BaseModel):
+    patches: list[NamedPatch] = Field(default_factory=list)
 
 
 def _rewriter():
     return ChatOpenRouter(
         model=os.getenv("REWRITE_MODEL", "deepseek/deepseek-v4-flash"),
         temperature=0,
-        max_tokens=4000,
+        max_tokens=8000,
         reasoning={"effort": "low"},
-    ).with_structured_output(PlanPatch)
+    ).with_structured_output(PatchBatch)
 
 
 def _should_rewrite(result: dict) -> str | None:
-    """Return a skip reason, or None if the LLM should run."""
+    """Return a skip reason, or None if the LLM should see this failure."""
     if result.get("passed"):
         return "already passed"
     kind = result.get("kind")
     if kind not in REWRITEABLE:
         return f"kind={kind} is not auto-fixed"
-    status = result.get("status_code")
-    if status in INFRA_STATUSES:
-        return f"HTTP {status} looks like auth/server, not a bad assertion"
+    # kind=body already means status matched expected (see execute_plans.py),
+    # so 401/403 body failures are intended auth tests, not infra skips.
+    if kind == "status" and result.get("status_code") in INFRA_STATUSES:
+        return (
+            f"HTTP {result.get('status_code')} looks like auth/server, "
+            "not a bad assertion"
+        )
     return None
 
 
@@ -96,74 +119,243 @@ def _clip_body(body: Any) -> Any:
     return dumped[:4000]
 
 
-def _apply(plan: dict, patch: PlanPatch) -> None:
-    plan["request_body"] = patch.request_body
-    plan["expected_response"] = patch.expected_response
+def _chunked(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
-def rewrite_plans(plans: list[dict], results: list[dict]) -> tuple[list[dict], int]:
-    if len(plans) != len(results):
-        raise SystemExit(
-            f"plans ({len(plans)}) and results ({len(results)}) length mismatch — re-run execute_plans.py"
+def _log(entries: list[dict], **entry) -> None:
+    entries.append(entry)
+
+
+def _apply(plan: dict, patch: NamedPatch, kind: str) -> str | None:
+    """Apply the field this kind is allowed to change. Return skip reason or None."""
+    if kind == "body":
+        if patch.expected_response is None:
+            return "body patch missing expected_response"
+        plan["expected_response"] = patch.expected_response
+        return None
+    if kind == "status":
+        if patch.request_body is None and plan.get("request_body") is not None:
+            return "status patch missing request_body"
+        plan["request_body"] = patch.request_body
+        return None
+    return f"kind={kind} is not auto-fixed"
+
+
+def _invoke_batch(llm, items: list[dict]) -> dict[str, NamedPatch]:
+    payload = []
+    for item in items:
+        failure = dict(item["result"])
+        failure["body"] = _clip_body(item["result"].get("body"))
+        payload.append({"plan": item["plan"], "failure": failure})
+
+    batch = llm.invoke(
+        [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=USER_PROMPT.format(
+                batch=json.dumps(payload, ensure_ascii=False, default=str)
+            )),
+        ]
+    )
+    by_name: dict[str, NamedPatch] = {}
+    for patch in batch.patches:
+        by_name[patch.name] = patch
+    return by_name
+
+
+def _fetch_patches(llm, items: list[dict], log_entries: list[dict]) -> dict[str, NamedPatch]:
+    """One batched call, then a repair call for names the model dropped."""
+    sent = {item["plan"]["name"] for item in items}
+    try:
+        by_name = _invoke_batch(llm, items)
+    except Exception as e:
+        for item in items:
+            _log(
+                log_entries,
+                name=item["plan"].get("name"),
+                kind=item["result"].get("kind"),
+                action="skip",
+                source="error",
+                reason=f"LLM error ({e})",
+            )
+        return {}
+
+    missing = [item for item in items if item["plan"]["name"] not in by_name]
+    if missing:
+        try:
+            by_name.update(_invoke_batch(llm, missing))
+        except Exception as e:
+            for item in missing:
+                _log(
+                    log_entries,
+                    name=item["plan"].get("name"),
+                    kind=item["result"].get("kind"),
+                    action="skip",
+                    source="error",
+                    reason=f"LLM repair-call error ({e})",
+                )
+
+    for name in sent - by_name.keys():
+        _log(
+            log_entries,
+            name=name,
+            kind=next(i["result"].get("kind") for i in items if i["plan"]["name"] == name),
+            action="skip",
+            source="implicit",
+            reason="name missing from model response",
         )
+    return by_name
 
-    llm = _rewriter()
-    patched = 0
-    for plan, result in zip(plans, results):
-        if result.get("name") not in (None, plan.get("name")):
-            print(f"  skip name mismatch: plan={plan.get('name')} result={result.get('name')}")
+
+def rewrite_plans(plans: list[dict], results: list[dict]) -> tuple[list[dict], int, list[dict]]:
+    log_entries: list[dict] = []
+    candidates: list[dict] = []
+
+    results_by_name: dict[str, dict] = {}
+    for result in results:
+        name = result.get("name")
+        if not name:
+            continue
+        if name in results_by_name:
+            _log(
+                log_entries,
+                name=name,
+                kind=result.get("kind"),
+                action="skip",
+                source="deterministic",
+                reason="duplicate result name; keeping the first",
+            )
+            print(f"  skip duplicate result name: {name}")
+            continue
+        results_by_name[name] = result
+
+    seen_plans: set[str] = set()
+    for plan in plans:
+        name = plan.get("name")
+        if not name:
+            _log(
+                log_entries,
+                name=name,
+                kind=None,
+                action="skip",
+                source="deterministic",
+                reason="plan has no name",
+            )
+            continue
+        if name in seen_plans:
+            _log(
+                log_entries,
+                name=name,
+                kind=None,
+                action="skip",
+                source="deterministic",
+                reason="duplicate plan name",
+            )
+            print(f"  skip duplicate plan name: {name}")
+            continue
+        seen_plans.add(name)
+
+        result = results_by_name.get(name)
+        if result is None:
+            _log(
+                log_entries,
+                name=name,
+                kind=None,
+                action="skip",
+                source="deterministic",
+                reason="no matching result",
+            )
+            print(f"  skip {name}: no matching result")
             continue
 
         skip_reason = _should_rewrite(result)
         if skip_reason:
-            print(f"  skip {plan.get('name')}: {skip_reason}")
-            continue
-
-        failure = dict(result)
-        failure["body"] = _clip_body(result.get("body"))
-
-        try:
-            patch = llm.invoke(
-                [
-                    SystemMessage(content=SYSTEM_PROMPT),
-                    HumanMessage(
-                        content=USER_PROMPT.format(
-                            plan=json.dumps(plan, ensure_ascii=False, default=str),
-                            failure=json.dumps(failure, ensure_ascii=False, default=str),
-                        )
-                    ),
-                ]
+            _log(
+                log_entries,
+                name=name,
+                kind=result.get("kind"),
+                action="skip",
+                source="deterministic",
+                reason=skip_reason,
             )
-        except Exception as e:
-            print(f"  skip {plan.get('name')}: LLM error ({e})")
+            print(f"  skip {name}: {skip_reason}")
             continue
 
-        if patch.action != "patch":
-            print(f"  skip {plan.get('name')}: {patch.reason}")
-            continue
+        candidates.append({"plan": plan, "result": result})
 
-        _apply(plan, patch)
-        patched += 1
-        print(f"  patch {plan.get('name')}: {patch.reason}")
+    llm = _rewriter()
+    patched = 0
+    for batch in _chunked(candidates, REWRITE_BATCH_SIZE):
+        by_name = _fetch_patches(llm, batch, log_entries)
+        for item in batch:
+            plan = item["plan"]
+            result = item["result"]
+            name = plan["name"]
+            kind = result.get("kind")
+            patch = by_name.get(name)
+            if patch is None:
+                print(f"  skip {name}: name missing from model response")
+                continue
+            if patch.action != "patch":
+                _log(
+                    log_entries,
+                    name=name,
+                    kind=kind,
+                    action="skip",
+                    source="llm",
+                    reason=patch.reason,
+                )
+                print(f"  skip {name}: {patch.reason}")
+                continue
 
-    return plans, patched
+            apply_skip = _apply(plan, patch, kind)
+            if apply_skip:
+                _log(
+                    log_entries,
+                    name=name,
+                    kind=kind,
+                    action="skip",
+                    source="apply",
+                    reason=apply_skip,
+                )
+                print(f"  skip {name}: {apply_skip}")
+                continue
+
+            field = "expected_response" if kind == "body" else "request_body"
+            _log(
+                log_entries,
+                name=name,
+                kind=kind,
+                action="patch",
+                source="llm",
+                field=field,
+                reason=patch.reason,
+            )
+            patched += 1
+            print(f"  patch {name} [{field}]: {patch.reason}")
+
+    return plans, patched, log_entries
 
 
-def main(plans_path: Path, results_path: Path):
+def main(plans_path: Path, results_path: Path, log_path: Path):
     plans = json.loads(plans_path.read_text(encoding="utf-8"))
     results = json.loads(results_path.read_text(encoding="utf-8"))
     print(f"Rewriting failures from {results_path}...")
-    plans, patched = rewrite_plans(plans, results)
+    plans, patched, log_entries = rewrite_plans(plans, results)
     plans_path.write_text(json.dumps(plans, indent=2, default=str), encoding="utf-8")
+    log_path.write_text(json.dumps(log_entries, indent=2, default=str), encoding="utf-8")
     print(f"Patched {patched} plan(s). Wrote {plans_path}")
+    print(f"Review reasons in {log_path} before trusting a green re-run.")
     print("Re-run: python execute_plans.py")
 
 
 if __name__ == "__main__":
     plans_arg = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "test_plans.json"
     results_arg = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "test_results.json"
+    log_arg = Path(sys.argv[3]) if len(sys.argv) > 3 else ROOT / "rewrite_log.json"
     if not plans_arg.exists():
         sys.exit(f"{plans_arg} not found")
     if not results_arg.exists():
         sys.exit(f"{results_arg} not found. Run python execute_plans.py first.")
-    main(plans_arg, results_arg)
+    main(plans_arg, results_arg, log_arg)

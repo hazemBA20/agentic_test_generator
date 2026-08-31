@@ -13,6 +13,7 @@ src/__pycache__
 src/helpers/test.py
 src/helpers/test_plans.json
 src/helpers/test_results.json
+src/helpers/rewrite_log.json
 NEXT_IMPROVEMENTS.md
 TEMPLATING_EVALUATION.md
 pyproject.toml
