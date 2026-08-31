@@ -220,7 +220,18 @@ def call_llm_2(state: State) -> dict:
         return {"plans": []}
 
     all_plans = asyncio.run(_build_all(operations, scenarios_per_operation))
-    
+    names = [p.name for p in all_plans]
+    if len(names) != len(set(names)):
+        used: set[str] = set()
+        for plan in all_plans:
+            ident, n = plan.name, 2
+            while ident in used:
+                ident = f"{plan.name}_{n}"
+                n += 1
+            if ident != plan.name:
+                print(f"Duplicate plan name {plan.name!r} renamed to {ident}")
+                plan.name = ident
+            used.add(ident)
     return {"plans": all_plans}
 
 # def create_test_file(state:State):
