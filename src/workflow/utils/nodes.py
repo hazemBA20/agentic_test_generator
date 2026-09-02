@@ -113,6 +113,8 @@ def _content_type(operation: dict) -> str:
     content = (op.get("requestBody") or {}).get("content", {})
     if "multipart/form-data" in content:
         return "multipart/form-data"
+    if "application/x-www-form-urlencoded" in content:
+        return "application/x-www-form-urlencoded"
     return "application/json"
 
 

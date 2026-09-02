@@ -203,6 +203,8 @@ def send_request(
         fields, files = split_multipart(request_body)
         kwargs["data"] = fields
         kwargs["files"] = files
+    elif content_type == "application/x-www-form-urlencoded":
+        kwargs["data"] = request_body
     else:
         kwargs["json"] = request_body
 
