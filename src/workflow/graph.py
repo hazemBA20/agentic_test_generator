@@ -64,22 +64,52 @@ def execute(state: State) -> dict:
     results_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
     passed = sum(result["passed"] for result in results)
     print(f"Execution complete: {passed}/{len(results)} passed. Results: {results_path}")
-    return {"results": results, "results_path": str(results_path)}
+
+    # The first execution supplies evidence to the reviewer. Executions after a
+    # review pass verify every recorded patch in the same audit log.
+    review_log = state.get("review_log") or []
+    review_pass = state.get("review_pass") or 0
+    if review_log and review_pass:
+        results_by_name = {result.get("name"): result for result in results}
+        patched_entries = [
+            entry
+            for entry in review_log
+            if entry.get("review_pass") == review_pass and entry.get("action") == "patch"
+        ]
+        for entry in patched_entries:
+            entry["verification"] = results_by_name.get(entry.get("name"))
+
+        log_path = Path(state.get("review_log_path") or DEFAULT_HELPERS / "rewrite_log.json")
+        log_path.write_text(json.dumps(review_log, indent=2, default=str), encoding="utf-8")
+        verified = sum(bool((entry.get("verification") or {}).get("passed")) for entry in patched_entries)
+        print(f"Reviewer pass {review_pass} verification: {verified}/{len(patched_entries)} patched test(s) passed.")
+
+    return {"results": results, "results_path": str(results_path), "review_log": review_log}
 
 
 def review_failures(state: State) -> dict:
     """Perform exactly one constrained plan-rewrite pass."""
     plans = [_plan_dict(plan) for plan in state.get("plans") or []]
     revised, patched_count, review_log = rewrite_plans(plans, state.get("results") or [])
+    review_pass = (state.get("review_pass") or 0) + 1
+    for entry in review_log:
+        entry["review_pass"] = review_pass
+
+    all_entries = [*(state.get("review_log") or []), *review_log]
     log_path = Path(state.get("review_log_path") or DEFAULT_HELPERS / "rewrite_log.json")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(json.dumps(review_log, indent=2, default=str), encoding="utf-8")
-    print(f"Reviewer patched {patched_count} plan(s). Log: {log_path}")
+    log_path.write_text(json.dumps(all_entries, indent=2, default=str), encoding="utf-8")
+    skipped = sum(entry.get("action") == "skip" for entry in review_log)
+    print(
+        f"Reviewer pass {review_pass}: {patched_count} patch(es), {skipped} skip(s). "
+        f"Detailed log: {log_path}"
+    )
     return {
         "plans": revised,
         "patched_count": patched_count,
-        "review_log": review_log,
+        "review_log": all_entries,
         "review_log_path": str(log_path),
+        "review_pass": review_pass,
         "reviewed": True,
     }
 

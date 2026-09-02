@@ -12,6 +12,7 @@ Usage (from this directory, after execute_plans.py):
     python rewrite_failed.py
     python rewrite_failed.py test_plans.json test_results.json
 """
+import copy
 import json
 import os
 import sys
@@ -326,10 +327,12 @@ def rewrite_plans(plans: list[dict], results: list[dict]) -> tuple[list[dict], i
                     action="skip",
                     source="llm",
                     reason=patch.reason,
+                    proposed_patch=patch.model_dump(),
                 )
                 print(f"  skip {name}: {patch.reason}")
                 continue
 
+            before_plan = copy.deepcopy(plan)
             apply_skip = _apply(plan, patch, kind)
             if apply_skip:
                 _log(
@@ -339,6 +342,7 @@ def rewrite_plans(plans: list[dict], results: list[dict]) -> tuple[list[dict], i
                     action="skip",
                     source="apply",
                     reason=apply_skip,
+                    proposed_patch=patch.model_dump(),
                 )
                 print(f"  skip {name}: {apply_skip}")
                 continue
@@ -359,10 +363,19 @@ def rewrite_plans(plans: list[dict], results: list[dict]) -> tuple[list[dict], i
                 source="llm",
                 field=field,
                 reason=patch.reason,
+                before=before_plan.get(field),
+                after=copy.deepcopy(plan.get(field)),
+                proposed_patch=patch.model_dump(),
             )
             patched += 1
             print(f"  patch {name} [{field}]: {patch.reason}")
 
+    # Attach the exact execution evidence that led to each decision. Values are
+    # still placeholders (for example <FIXTURE:expert_code>), not credentials.
+    for entry in log_entries:
+        result = results_by_name.get(entry.get("name"))
+        if result is not None:
+            entry["failure"] = copy.deepcopy(result)
     return plans, patched, log_entries
 
 

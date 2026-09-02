@@ -23,6 +23,7 @@ def main(args):
             "run_tests": args.run_tests or args.review,
             "review": args.review,
             "reviewed": False,
+            "review_pass": 0,
         }
     )
     print(f"Generated test suite: {state['tests_path']}")

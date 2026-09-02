@@ -22,6 +22,9 @@ class TestPlan(BaseModel):
     method: str = Field(..., description="HTTP method, e.g. 'POST'")
     path: str = Field(..., description="Endpoint path, e.g. '/experts/copilot/mission/add'")
     request_body: dict[str, Any] | None = Field(None, description="Request payload to send")
+    path_params: dict[str, Any] = Field(default_factory=dict, description="Values substituted into {path} placeholders")
+    query_params: dict[str, Any] = Field(default_factory=dict, description="Query-string parameter values")
+    headers: dict[str, Any] = Field(default_factory=dict, description="Operation-specific request headers; excludes X-API-KEY")
 
     expected_status_code: int = Field(..., description="Expected HTTP status code")
     expected_response: dict[str, Any] | None = Field(None, description="Expected response body or key fields to assert on")
@@ -50,6 +53,7 @@ class State(TypedDict):
     run_tests: bool | None
     review: bool | None
     reviewed: bool | None
+    review_pass: int | None
     operations: list[dict] | None
     scenarios: list[list[ScenarioSpec]] | None  # one sub-list per operation, aligned by index
     plans: list[TestPlan] | list[dict] | None
