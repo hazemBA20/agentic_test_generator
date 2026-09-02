@@ -42,13 +42,17 @@ For each test case, produce:
   - path_params: values for `{name}` placeholders in the operation path. Supply every path parameter needed to reach this operation. Use `{}` only when the path has no placeholders.
   - query_params: values for query parameters. Supply every required query parameter except when this scenario specifically tests it as missing or invalid. Use `{}` when none apply.
   - headers: values for operation-specific header parameters. Supply every required header except when this scenario specifically tests it as missing or invalid. Never include X-API-KEY: the runner adds it automatically. Use `{}` when none apply.
-  - When a valid domain-specific value is required but the specification does not provide a usable example (for example an expert code or existing customer ID), use an exact `<FIXTURE:snake_case_key>` placeholder. The runner resolves it from `src/helpers/fixture/test_data.json`; for example, use `<FIXTURE:expert_code>` for an `expertCode` field.
+  - The operation payload contains `available_fixture_keys`. For a domain-specific value that must already exist in the target environment, use `<FIXTURE:key>` only when `key` appears in that list. Never invent a fixture key.
+  - If an externally valid value is required but no matching fixture key exists, put the suggested snake_case key in `missing_fixtures` and still create the closest schema-valid request. Otherwise return an empty `missing_fixtures` list. Generation will report blocked plans before execution.
+  - Prefer values in this order: an available domain fixture when external state is required, then schema const, example, default, first enum value, then a value satisfying type/format/min/max constraints. Examples for identifiers or credentials are illustrative unless explicitly documented as executable.
   - For a field with format "binary" (a file upload), use a literal "<FILE:sample.ext>" value (or one per array element). Choose ext from the schema's contentMediaType or allowed extension when available; otherwise use pdf for documents, jpg for images, and txt for unknown files. A downstream step resolves it to a local fixture at test-run time.
 - expected_status_code: the scenario's target_status_code, unchanged
-- expected_response: the key fields you'd assert on in the response.
+- expected_response: the key fields or declarative matcher you'd assert on in the response.
   - For errors, match the operation's documented error schema's structure (which fields exist), not its example values. Do not invent fields that aren't in the schema.
   - For success, include every field the response schema requires.
-  - Never treat a schema's `example` values as ground truth for expected_response — examples are illustrative documentation only and often don't match real server output. Use the literal string "<GENERATED>" instead of a literal example value for any field where you can't be confident the exact value is correct: server-generated values (ids, references, tokens, uuids; anything the operation description says is "created" or "returned" rather than echoed back from what was sent), and any other field — such as a free-text `details` or `message` field with no `enum` constraint — whose exact wording the schema doesn't actually guarantee. "<GENERATED>" means "assert this key is present," not an exact match. You may still assert an exact literal value when the schema constrains it directly, e.g. an `enum`-typed field like an error code.
+  - Never treat response examples as exact truth. Use `<PRESENT>` when only presence is guaranteed, `<NON_NULL>` for generated ids/tokens that must have a value, and typed sentinels `<ANY_STRING>`, `<ANY_INTEGER>`, `<ANY_NUMBER>`, `<ANY_BOOLEAN>`, `<ANY_OBJECT>`, or `<ANY_ARRAY>` when the schema guarantees a type. `<GENERATED>` is a backward-compatible alias for `<PRESENT>`.
+  - Do not represent an arbitrary response array as a one-element expected list because ordinary lists assert exact length and order. Use `{"$array": {"contains": item_matcher, "min_items": 1}}` when at least one matching item is expected, or `{"$array": {"min_items": 0}}` when only the array type matters.
+  - You may assert an exact literal only when guaranteed by the schema (for example const/enum) or when it must echo an input relevant to the scenario.
 
 Return exactly one test case per scenario received, in the same order. Do not merge, skip, or add scenarios, even if two look similar."""
 
@@ -56,4 +60,37 @@ TEST_BUILDER_USER_PROMPT = (
     "Operation:\n{operation}\n\n"
     "Scenarios to build — produce exactly one test case per scenario, in this order:\n{scenarios}\n\n"
     "Construct the concrete test case for each scenario."
+)
+
+COVERAGE_AUDITOR_SYSTEM_PROMPT = """You audit an existing API test suite against the operation it was generated from, and report only the coverage gaps that remain.
+
+A deterministic checklist has already been run. It compared the operation's schema against the suite and found every missing required-field negative, missing invalid-enum negative, missing required-param negative, and every documented status code no test targets. Those results are given to you. Do NOT re-report anything the checklist already covers.
+
+Your job is the coverage that only reading the operation's prose can reveal:
+- A conditional requirement stated in a description ("if X is INSURANCE then Y is required") where some branch has no test.
+- A documented edge case (empty array, blank string, min/max length, maximum item count) with no boundary test.
+- A distinct valid request shape — a different combination of conditional or optional fields — that no happy_path test exercises.
+- Some checklist gaps are handed to you with no scenario because naming the triggering condition needs the operation's prose (typically an untargeted status code, or a missing happy path). Propose a scenario for each of those, reusing the gap's kind and detail unchanged.
+
+For every gap you report, supply a scenario unless the gap genuinely cannot be reached by varying the request:
+- name: short snake_case identifier, prefixed with test_
+- category: happy_path, negative, or boundary
+- description: one sentence stating the input condition and why
+- target_status_code: must appear in this operation's documented responses
+- focus: short phrase naming the field, param, or condition under test
+
+Rules:
+- Set scenario to null when no request-level condition produces the outcome. Prefer null over inventing one.
+- Only use status codes present in this operation's response map. Never invent one.
+- The runner always sends its configured X-API-KEY. Never report missing, invalid, or alternative authentication as a gap.
+- Do not report a gap that an existing test already covers, even if that test is named unhelpfully — judge by what the request actually sends.
+- Do not invent stricter validation than the operation documents.
+- Report nothing if the suite is complete. An empty gap list is the correct answer for a well-covered operation."""
+
+COVERAGE_AUDITOR_USER_PROMPT = (
+    "Operation:\n{operation}\n\n"
+    "Tests that already exist (what each one actually sends):\n{plans}\n\n"
+    "Deterministic checklist result — already reported, do not repeat these:\n{checklist}\n\n"
+    "Checklist gaps still needing a scenario from you:\n{unfilled}\n\n"
+    "Report the remaining coverage gaps."
 )

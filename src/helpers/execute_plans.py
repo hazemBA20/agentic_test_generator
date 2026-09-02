@@ -14,15 +14,25 @@ from pathlib import Path
 
 try:  # Supports both `python execute_plans.py` and package imports by LangGraph.
     from ._test_support import send_request, assert_response
+    from .plan_validation import validate_plans
 except ImportError:  # pragma: no cover - direct-script compatibility
     from _test_support import send_request, assert_response
+    from plan_validation import validate_plans
 
 ROOT = Path(__file__).resolve().parent
 BODY_SNIPPET = 800
 
 
-def execute_plan(plan: dict) -> dict:
+def execute_plan(plan: dict, issues: list[str] | None = None) -> dict:
     name = plan.get("name", "unnamed")
+    if issues:
+        return {
+            "name": name,
+            "passed": False,
+            "skipped": True,
+            "kind": "invalid_plan",
+            "error": "Invalid plan: " + "; ".join(issues),
+        }
     expected_status = plan["expected_status_code"]
     try:
         resp = send_request(
@@ -33,11 +43,14 @@ def execute_plan(plan: dict) -> dict:
             path_params=plan.get("path_params") or {},
             query_params=plan.get("query_params") or {},
             headers=plan.get("headers") or {},
+            requires_api_key=plan.get("requires_api_key", False),
+            requires_jwt=plan.get("requires_jwt", False),
         )
     except Exception as e:
         return {
             "name": name,
             "passed": False,
+            "skipped": False,
             "kind": "error",
             "error": str(e),
         }
@@ -52,6 +65,7 @@ def execute_plan(plan: dict) -> dict:
         return {
             "name": name,
             "passed": False,
+            "skipped": False,
             "kind": "status",
             "expected_status": expected_status,
             "status_code": resp.status_code,
@@ -59,13 +73,14 @@ def execute_plan(plan: dict) -> dict:
         }
 
     expected_response = plan.get("expected_response")
-    if expected_response:
+    if expected_response is not None:
         try:
             assert_response(body_json, expected_response, context=f"{name}: ")
         except AssertionError as e:
             return {
                 "name": name,
                 "passed": False,
+                "skipped": False,
                 "kind": "body",
                 "status_code": resp.status_code,
                 "error": str(e),
@@ -75,13 +90,27 @@ def execute_plan(plan: dict) -> dict:
     return {
         "name": name,
         "passed": True,
+        "skipped": False,
         "kind": "pass",
         "status_code": resp.status_code,
     }
 
 
 def execute_plans(plans: list[dict]) -> list[dict]:
-    return [execute_plan(plan) for plan in plans]
+    issues_by_plan = validate_plans(plans)
+    results = []
+    for index, (plan, issues) in enumerate(zip(plans, issues_by_plan)):
+        if not isinstance(plan, dict):
+            results.append({
+                "name": f"plan at index {index}",
+                "passed": False,
+                "skipped": True,
+                "kind": "invalid_plan",
+                "error": "Invalid plan: " + "; ".join(issues),
+            })
+        else:
+            results.append(execute_plan(plan, issues))
+    return results
 
 
 def main(plans_path: Path, out_path: Path | None):
@@ -91,13 +120,16 @@ def main(plans_path: Path, out_path: Path | None):
         return
 
     results = execute_plans(plans)
-    passed = sum(1 for r in results if r["passed"])
-    failed = [r for r in results if not r["passed"]]
+    passed = sum(1 for result in results if result["passed"])
+    skipped = [result for result in results if result.get("skipped")]
+    failed = [result for result in results if not result["passed"] and not result.get("skipped")]
 
-    print(f"{passed}/{len(results)} passed")
-    for r in failed:
-        extra = r.get("error") or f"status {r.get('status_code')} (expected {r.get('expected_status')})"
-        print(f"  FAIL [{r.get('kind')}] {r['name']}: {extra}")
+    print(f"{passed} passed, {len(skipped)} skipped, {len(failed)} failed")
+    for result in skipped:
+        print(f"  SKIP [{result.get('kind')}] {result['name']}: {result.get('error')}")
+    for result in failed:
+        extra = result.get("error") or f"status {result.get('status_code')} (expected {result.get('expected_status')})"
+        print(f"  FAIL [{result.get('kind')}] {result['name']}: {extra}")
 
     if out_path:
         out_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")

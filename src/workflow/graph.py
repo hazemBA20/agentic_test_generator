@@ -10,7 +10,7 @@ from helpers.generate_test_file import generate
 from helpers.parser import ingest_openapi_spec
 from helpers.rewrite_failed import rewrite_plans
 from workflow.utils.models import State
-from workflow.utils.nodes import call_llm_1, call_llm_2
+from workflow.utils.nodes import call_llm_1, call_llm_2, coverage_audit, fill_gaps
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +19,19 @@ DEFAULT_HELPERS = ROOT / "src" / "helpers"
 
 def _plan_dict(plan) -> dict:
     return plan.model_dump() if hasattr(plan, "model_dump") else dict(plan)
+
+
+class PartialBuildError(RuntimeError):
+    """Raised when persisting a partial build would shrink an existing suite."""
+
+
+def _existing_plan_count(plans_path: Path) -> int:
+    """How many plans the file we are about to replace already holds."""
+    try:
+        existing = json.loads(plans_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    return len(existing) if isinstance(existing, list) else 0
 
 
 def ingest(state: State) -> dict:
@@ -40,11 +53,27 @@ def persist_plans(state: State) -> dict:
     """Persist plans as JSON; this is the durable source for generated tests."""
     plans_path = Path(state.get("plans_path") or DEFAULT_HELPERS / "test_plans.json")
     plans_path.parent.mkdir(parents=True, exist_ok=True)
-    plans_path.write_text(
-        json.dumps([_plan_dict(plan) for plan in state.get("plans") or []], indent=2),
-        encoding="utf-8",
-    )
-    print(f"Wrote {len(state.get('plans') or [])} test plan(s) to {plans_path}")
+    plans = [_plan_dict(plan) for plan in state.get("plans") or []]
+    payload = json.dumps(plans, indent=2)
+
+    # A batch the builder lost to quota or a timeout takes its scenarios with it.
+    # Writing what survived over a larger previous suite deletes working tests to
+    # no benefit and exits 0, so the run looks fine while the suite silently
+    # shrank. Quarantine the partial result and stop instead.
+    existing_count = _existing_plan_count(plans_path)
+    if state.get("build_failures") and existing_count > len(plans):
+        partial_path = plans_path.with_name(f"{plans_path.stem}.partial.json")
+        partial_path.write_text(payload, encoding="utf-8")
+        raise PartialBuildError(
+            f"The builder dropped {state['build_failures']} batch(es): only {len(plans)} "
+            f"plan(s) survived, fewer than the {existing_count} already in {plans_path}. "
+            f"Refusing to overwrite a larger suite with a partial one.\n"
+            f"The partial result is in {partial_path}. {plans_path} and the rendered "
+            f"suite are untouched — re-run once the model is reachable again."
+        )
+
+    plans_path.write_text(payload, encoding="utf-8")
+    print(f"Wrote {len(plans)} test plan(s) to {plans_path}")
     return {"plans_path": str(plans_path)}
 
 
@@ -62,8 +91,13 @@ def execute(state: State) -> dict:
     results_path = Path(state.get("results_path") or DEFAULT_HELPERS / "test_results.json")
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
-    passed = sum(result["passed"] for result in results)
-    print(f"Execution complete: {passed}/{len(results)} passed. Results: {results_path}")
+    passed = sum(bool(result.get("passed")) for result in results)
+    skipped = sum(bool(result.get("skipped")) for result in results)
+    failed = len(results) - passed - skipped
+    print(
+        f"Execution complete: {passed} passed, {skipped} skipped, {failed} failed. "
+        f"Results: {results_path}"
+    )
 
     # The first execution supplies evidence to the reviewer. Executions after a
     # review pass verify every recorded patch in the same audit log.
@@ -100,29 +134,72 @@ def review_failures(state: State) -> dict:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(json.dumps(all_entries, indent=2, default=str), encoding="utf-8")
     skipped = sum(entry.get("action") == "skip" for entry in review_log)
-    print(
-        f"Reviewer pass {review_pass}: {patched_count} patch(es), {skipped} skip(s). "
-        f"Detailed log: {log_path}"
-    )
+    # A skip because the model call failed is not the reviewer deciding a failure
+    # is unfixable — it never saw the failure at all. Reporting both as "skip"
+    # makes an unreachable model look like a clean bill of health.
+    errored = sum(entry.get("source") == "error" for entry in review_log)
+    summary = f"Reviewer pass {review_pass}: {patched_count} patch(es), {skipped} skip(s)"
+    if errored:
+        summary += f", of which {errored} are model errors rather than judgments"
+    print(f"{summary}. Detailed log: {log_path}")
     return {
         "plans": revised,
         "patched_count": patched_count,
         "review_log": all_entries,
         "review_log_path": str(log_path),
         "review_pass": review_pass,
+        "review_errors": errored,
         "reviewed": True,
     }
 
 
-def _after_render(state: State) -> Literal["execute", "end"]:
+def coverage(state: State) -> dict:
+    """Audit the rendered suite against the spec and persist the report."""
+    result = coverage_audit(state)
+    report_path = Path(
+        state.get("coverage_report_path") or DEFAULT_HELPERS / "coverage_report.json"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(result.get("coverage_report") or [], indent=2, default=str), encoding="utf-8"
+    )
+    print(f"Coverage report: {report_path}")
+    return {**result, "coverage_report_path": str(report_path)}
+
+
+def _after_render(state: State) -> Literal["coverage", "execute", "end"]:
+    if state.get("coverage") and not state.get("coverage_done"):
+        return "coverage"
+    return "execute" if state.get("run_tests") else "end"
+
+
+def _after_coverage(state: State) -> Literal["fill", "execute", "end"]:
+    has_fillable = any(
+        scenarios for scenarios in state.get("coverage_gap_scenarios") or []
+    )
+    if has_fillable:
+        return "fill"
+    return "execute" if state.get("run_tests") else "end"
+
+
+def _after_fill(state: State) -> Literal["persist", "execute", "end"]:
+    if state.get("filled_count", 0) > 0:
+        return "persist"
     return "execute" if state.get("run_tests") else "end"
 
 
 def _after_execute(state: State) -> Literal["review", "end"]:
-    has_failures = any(not result.get("passed") for result in state.get("results") or [])
+    has_failures = any(
+        not result.get("passed") and not result.get("skipped")
+        for result in state.get("results") or []
+    )
     if state.get("review") and not state.get("reviewed") and has_failures:
         return "review"
     return "end"
+
+
+def _after_review(state: State) -> Literal["persist", "end"]:
+    return "persist" if state.get("patched_count", 0) > 0 else "end"
 
 
 def compile_workflow():
@@ -133,6 +210,8 @@ def compile_workflow():
     graph.add_node("builder", call_llm_2)
     graph.add_node("persist_plans", persist_plans)
     graph.add_node("render", render)
+    graph.add_node("coverage", coverage)
+    graph.add_node("fill_gaps", fill_gaps)
     graph.add_node("execute", execute)
     graph.add_node("review", review_failures)
     graph.add_edge(START, "ingest")
@@ -140,7 +219,18 @@ def compile_workflow():
     graph.add_edge("planner", "builder")
     graph.add_edge("builder", "persist_plans")
     graph.add_edge("persist_plans", "render")
-    graph.add_conditional_edges("render", _after_render, {"execute": "execute", "end": END})
+    graph.add_conditional_edges(
+        "render", _after_render,
+        {"coverage": "coverage", "execute": "execute", "end": END},
+    )
+    graph.add_conditional_edges(
+        "coverage", _after_coverage,
+        {"fill": "fill_gaps", "execute": "execute", "end": END},
+    )
+    graph.add_conditional_edges(
+        "fill_gaps", _after_fill,
+        {"persist": "persist_plans", "execute": "execute", "end": END},
+    )
     graph.add_conditional_edges("execute", _after_execute, {"review": "review", "end": END})
-    graph.add_edge("review", "persist_plans")
+    graph.add_conditional_edges("review", _after_review, {"persist": "persist_plans", "end": END})
     return graph.compile()

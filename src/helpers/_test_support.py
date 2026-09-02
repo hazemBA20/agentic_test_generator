@@ -1,25 +1,51 @@
 """Runtime support for generated API tests.
 
-Every request uses the X-API-KEY provided through the environment. Binary
-sentinels resolve to local fixture files without baking API-specific filenames
-into generated test plans.
+Generated company requests use the X-API-KEY provided through the environment.
+Binary sentinels resolve to local fixture files without baking API-specific
+filenames into generated test plans.
 """
 import json
 import mimetypes
 import os
 import re
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
 
 import requests
+from dotenv import load_dotenv
+
+# This module is imported before the workflow's own load_dotenv() runs, so it
+# loads .env itself — otherwise a key set only in .env is invisible here.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv()
 
 BASE_URL = os.environ.get("API_BASE_URL", "https://test.patch.digiclaim.tn/api")
-API_KEY = os.environ.get("DIGIEXPERT_API_KEY")
+
+
+def _api_key() -> str | None:
+    """Read the key at request time, not import time.
+
+    Generated suites are also imported directly by pytest, where the key may be
+    exported after this module is first loaded.
+    """
+    return os.environ.get("DIGIEXPERT_API_KEY")
+
 
 FIXTURES_DIR = Path(__file__).parent / "fixture"
 DATA_FIXTURES_PATH = FIXTURES_DIR / "test_data.json"
 GENERATED_SENTINEL = "<GENERATED>"
+PRESENT_SENTINELS = {GENERATED_SENTINEL, "<PRESENT>"}
+NON_NULL_SENTINEL = "<NON_NULL>"
+TYPE_SENTINELS = {
+    "<ANY_STRING>": (str, "string"),
+    "<ANY_INTEGER>": (int, "integer"),
+    "<ANY_NUMBER>": ((int, float), "number"),
+    "<ANY_BOOLEAN>": (bool, "boolean"),
+    "<ANY_OBJECT>": (dict, "object"),
+    "<ANY_ARRAY>": (list, "array"),
+}
 FILE_PREFIX = "<FILE:"
 FILE_SUFFIX = ">"
 DATA_PREFIX = "<FIXTURE:"
@@ -80,6 +106,11 @@ def resolve_test_data(value):
 
 def _resolve_fixture(sentinel: str) -> tuple[str, Path]:
     filename = sentinel[len(FILE_PREFIX):-len(FILE_SUFFIX)]
+    # Tolerate the common model shorthand <FILE:pdf> as <FILE:sample.pdf>
+    # rather than treating "pdf" as an extensionless filename and selecting an
+    # unrelated fallback file.
+    if re.fullmatch(r"[A-Za-z0-9]+", filename):
+        filename = f"sample.{filename.lower()}"
     requested = Path(filename)
     if requested.name != filename or filename in {"", ".", ".."}:
         raise ValueError(f"Unsafe fixture name {filename!r}")
@@ -124,6 +155,38 @@ def split_multipart(body: dict | None) -> tuple[dict, list]:
     return fields, files
 
 
+def _form_parts(fields: dict) -> list:
+    """Plain form fields as file-less multipart parts, one part per list element."""
+    parts = []
+    for name, value in fields.items():
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if item is None:
+                continue
+            text = item if isinstance(item, str) else json.dumps(item)
+            parts.append((str(name), (None, text)))
+    return parts
+
+
+def _multipart_kwargs(fields: dict, files: list, headers: dict) -> dict:
+    """Build request kwargs that stay ``multipart/form-data`` in every case.
+
+    ``requests`` only emits a multipart Content-Type when ``files`` is non-empty;
+    given an empty list it downgrades to urlencoded, or sends no Content-Type at
+    all. A negative test that deliberately omits the file part would then be
+    rejected on media type (415) instead of having its body validated — the
+    request never reaches the check the test exists to make. Sending the plain
+    fields as file-less parts keeps the encoding correct, and a body with no
+    parts at all still gets an explicit boundary.
+    """
+    parts = [*files, *_form_parts(fields)]
+    if parts:
+        return {"files": parts}
+    boundary = uuid.uuid4().hex
+    headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+    return {"data": f"--{boundary}--\r\n".encode()}
+
+
 def _render_path(path: str, path_params: dict) -> str:
     """Substitute and URL-encode every OpenAPI `{parameter}` placeholder."""
     rendered = path
@@ -141,11 +204,22 @@ def _render_path(path: str, path_params: dict) -> str:
     return rendered
 
 
-def _request_headers(extra_headers: dict) -> dict[str, str]:
-    """Merge operation headers without allowing generated data to replace the API key."""
-    headers = {"X-API-KEY": API_KEY}
+def _request_headers(
+    extra_headers: dict,
+    requires_api_key: bool,
+) -> dict[str, str]:
+    """Merge operation headers with the company API key when required."""
+    headers: dict[str, str] = {}
+    if requires_api_key:
+        api_key = _api_key()
+        if not api_key:
+            raise RuntimeError(
+                "DIGIEXPERT_API_KEY not set for an API-key-protected operation. "
+                "Export it in your shell or add it to .env at the repo root."
+            )
+        headers["X-API-KEY"] = api_key
     for name, value in extra_headers.items():
-        if str(name).lower() == "x-api-key":
+        if str(name).lower() in {"authorization", "x-api-key"}:
             continue
         if value is not None:
             headers[str(name)] = ",".join(map(str, value)) if isinstance(value, list) else str(value)
@@ -160,9 +234,10 @@ def send_request(
     path_params: dict | None = None,
     query_params: dict | None = None,
     headers: dict | None = None,
+    requires_api_key: bool = False,
+    requires_jwt: bool = False,
 ):
-    if not API_KEY:
-        raise RuntimeError("DIGIEXPERT_API_KEY not set")
+    """Send a request; ``requires_jwt`` is retained but ignored by company policy."""
     request_body = resolve_test_data(request_body)
     path_params = resolve_test_data(path_params or {})
     query_params = resolve_test_data(query_params or {})
@@ -172,29 +247,70 @@ def send_request(
     kwargs = {
         "method": method,
         "url": f"{BASE_URL}{rendered_path}",
-        "headers": _request_headers(headers),
+        "headers": _request_headers(headers, requires_api_key),
         "params": query_params or None,
         "timeout": 15,
     }
+    files: list = []
     if content_type == "multipart/form-data":
         fields, files = split_multipart(request_body)
-        kwargs["data"] = fields
-        kwargs["files"] = files
+        kwargs.update(_multipart_kwargs(fields, files, kwargs["headers"]))
+    elif content_type == "application/x-www-form-urlencoded":
+        kwargs["data"] = request_body
     else:
         kwargs["json"] = request_body
 
     try:
         return requests.request(**kwargs)
     finally:
-        for _, (_, fh, _) in kwargs.get("files", []):
-            fh.close()
+        for _, (_, handle, _) in files:
+            handle.close()
 
 
 def assert_response(actual, expected, context: str = ""):
     _assert_value(actual, expected, context)
 
 
+def _assert_array_matcher(actual, options, path: str):
+    assert isinstance(actual, list), f"{path}: expected an array, got {actual!r}"
+    assert isinstance(options, dict), f"{path}: $array matcher must be an object"
+    if "min_items" in options:
+        assert len(actual) >= options["min_items"], (
+            f"{path}: expected at least {options['min_items']} item(s), got {len(actual)}"
+        )
+    if "max_items" in options:
+        assert len(actual) <= options["max_items"], (
+            f"{path}: expected at most {options['max_items']} item(s), got {len(actual)}"
+        )
+    if "contains" in options:
+        failures = []
+        for index, item in enumerate(actual):
+            try:
+                _assert_value(item, options["contains"], f"{path}[{index}].")
+                break
+            except AssertionError as exc:
+                failures.append(str(exc))
+        else:
+            detail = failures[0] if failures else "array is empty"
+            raise AssertionError(f"{path}: no array item matched contains ({detail})")
+
+
 def _assert_value(actual, expected, path: str):
+    if isinstance(expected, str) and expected in PRESENT_SENTINELS:
+        return
+    if expected == NON_NULL_SENTINEL:
+        assert actual is not None, f"{path}: expected a non-null value"
+        return
+    if isinstance(expected, str) and expected in TYPE_SENTINELS:
+        expected_type, type_name = TYPE_SENTINELS[expected]
+        matches = isinstance(actual, expected_type)
+        if expected in {"<ANY_INTEGER>", "<ANY_NUMBER>"} and isinstance(actual, bool):
+            matches = False
+        assert matches, f"{path}: expected {type_name}, got {actual!r}"
+        return
+    if isinstance(expected, dict) and set(expected) == {"$array"}:
+        _assert_array_matcher(actual, expected["$array"], path)
+        return
     if isinstance(expected, dict):
         assert isinstance(actual, dict), f"{path}: expected an object, got {actual!r}"
         for key, exp_v in expected.items():
@@ -207,8 +323,5 @@ def _assert_value(actual, expected, path: str):
         )
         for i, (a, e) in enumerate(zip(actual, expected)):
             _assert_value(a, e, f"{path}[{i}].")
-    elif expected == GENERATED_SENTINEL:
-        # assert actual is not None or actual==NULL, f"{path}: expected a server-generated value, got None"
-        return
     else:
         assert actual == expected, f"{path}: expected {expected!r}, got {actual!r}"

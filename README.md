@@ -157,6 +157,13 @@ Support details in `_test_support.py`:
   local file under `fixture/`. Exact filenames are optional: the runner first
   looks for a matching extension, then uses any available sample while keeping
   the requested upload filename.
+- **Parameters** — path placeholders are URL-encoded, query values are sent via
+  `requests` query handling, and documented non-auth header parameters are
+  included with every generated request.
+- **Data fixtures** — `fixture/test_data.json` provides valid domain values for
+  happy-path tests. Use an exact placeholder such as `<FIXTURE:expert_code>` in
+  a plan to resolve `expert_code`; use `<ENV:VARIABLE_NAME>` for values that
+  must stay outside the repository.
 - **Response assertions** — `assert_response` walks the expected dict; the
   sentinel `<GENERATED>` asserts a key exists without pinning its value, so
   server-generated ids/references don't cause brittle failures.
