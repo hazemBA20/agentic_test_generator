@@ -13,9 +13,24 @@ from pathlib import Path
 from urllib.parse import quote
 
 import requests
+from dotenv import load_dotenv
+
+# This module is imported before the workflow's own load_dotenv() runs, so it
+# loads .env itself — otherwise a key set only in .env is invisible here.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv()
 
 BASE_URL = os.environ.get("API_BASE_URL", "https://test.patch.digiclaim.tn/api")
-API_KEY = os.environ.get("DIGIEXPERT_API_KEY")
+
+
+def _api_key() -> str | None:
+    """Read the key at request time, not import time.
+
+    Generated suites are also imported directly by pytest, where the key may be
+    exported after this module is first loaded.
+    """
+    return os.environ.get("DIGIEXPERT_API_KEY")
+
 
 FIXTURES_DIR = Path(__file__).parent / "fixture"
 DATA_FIXTURES_PATH = FIXTURES_DIR / "test_data.json"
@@ -163,9 +178,13 @@ def _request_headers(
     """Merge operation headers with the company API key when required."""
     headers: dict[str, str] = {}
     if requires_api_key:
-        if not API_KEY:
-            raise RuntimeError("DIGIEXPERT_API_KEY not set for an API-key-protected operation")
-        headers["X-API-KEY"] = API_KEY
+        api_key = _api_key()
+        if not api_key:
+            raise RuntimeError(
+                "DIGIEXPERT_API_KEY not set for an API-key-protected operation. "
+                "Export it in your shell or add it to .env at the repo root."
+            )
+        headers["X-API-KEY"] = api_key
     for name, value in extra_headers.items():
         if str(name).lower() in {"authorization", "x-api-key"}:
             continue
