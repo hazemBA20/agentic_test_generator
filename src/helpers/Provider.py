@@ -16,5 +16,8 @@ def init_chat_model():
     
         print(chunk.content, end="")
     return client
+
+
+
 if __name__ == "__main__":
     init_chat_model()  

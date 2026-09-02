@@ -36,6 +36,65 @@ def _plan(**overrides):
 
 def test_state_workflow_fields_are_optional():
     assert {"run_tests", "review", "tests_path", "results"} <= State.__optional_keys__
+    assert {"build_failures", "review_errors"} <= State.__optional_keys__
+
+
+def test_a_partial_build_never_overwrites_a_larger_suite_on_disk(tmp_path, monkeypatch):
+    """A builder batch lost to quota must not shrink the persisted plan file."""
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    graph = importlib.import_module("workflow.graph")
+
+    plans_path = tmp_path / "test_plans.json"
+    plans_path.write_text(json.dumps([{"a": 1}, {"b": 2}, {"c": 3}]), encoding="utf-8")
+
+    with pytest.raises(graph.PartialBuildError, match="Refusing to overwrite"):
+        graph.persist_plans({
+            "plans": [{"d": 4}],
+            "build_failures": 1,
+            "plans_path": str(plans_path),
+        })
+
+    # The previous suite survives and the partial build is quarantined next to it.
+    assert json.loads(plans_path.read_text(encoding="utf-8")) == [{"a": 1}, {"b": 2}, {"c": 3}]
+    partial = json.loads((tmp_path / "test_plans.partial.json").read_text(encoding="utf-8"))
+    assert partial == [{"d": 4}]
+
+
+def test_a_full_build_or_first_run_still_persists_normally(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    graph = importlib.import_module("workflow.graph")
+
+    plans_path = tmp_path / "test_plans.json"
+    plans_path.write_text(json.dumps([{"a": 1}]), encoding="utf-8")
+    # Same number of plans (full rebuild) and failure-count zero both write fine.
+    result = graph.persist_plans({
+        "plans": [{"b": 2}], "build_failures": 1, "plans_path": str(plans_path),
+    })
+    assert json.loads(plans_path.read_text(encoding="utf-8")) == [{"b": 2}]
+    assert result["plans_path"] == str(plans_path)
+
+    first_run = tmp_path / "fresh.json"
+    graph.persist_plans({"plans": [{"c": 3}], "build_failures": 1, "plans_path": str(first_run)})
+    assert json.loads(first_run.read_text(encoding="utf-8")) == [{"c": 3}]
+    assert not (tmp_path / "fresh.partial.json").exists()
+
+
+def test_review_errors_are_distinguished_from_judgment_skips(monkeypatch):
+    """An error-skip is not the reviewer deciding the failure is unfixable."""
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    graph = importlib.import_module("workflow.graph")
+
+    state = graph.review_failures({
+        "plans": [],
+        "results": [],
+        "review_log": [
+            {"name": "x", "action": "skip", "source": "error", "reason": "LLM error (quota)"},
+            {"name": "y", "action": "skip", "source": "llm", "reason": "auth out of scope"},
+        ],
+    })
+    assert state["review_errors"] == 1
+    assert state["reviewed"] is True
+    assert state["review_pass"] == 1
 
 
 def test_review_routing_ignores_skips_and_stops_without_patches(monkeypatch):
@@ -222,7 +281,7 @@ def test_public_request_does_not_require_credentials(monkeypatch):
         return object()
 
     monkeypatch.setattr(_test_support.requests, "request", fake_request)
-    monkeypatch.setattr(_test_support, "API_KEY", None)
+    monkeypatch.delenv("DIGIEXPERT_API_KEY", raising=False)
 
     _test_support.send_request("GET", "/health", None, "application/json")
 
@@ -237,7 +296,7 @@ def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
         return object()
 
     monkeypatch.setattr(_test_support.requests, "request", fake_request)
-    monkeypatch.setattr(_test_support, "API_KEY", "company-api-key")
+    monkeypatch.setenv("DIGIEXPERT_API_KEY", "company-api-key")
     monkeypatch.setenv("API_JWT", "legacy-jwt")
     monkeypatch.setenv("DIGIEXPERT_JWT", "legacy-jwt")
 
@@ -255,7 +314,7 @@ def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
 
 
 def test_protected_request_reports_missing_credential(monkeypatch):
-    monkeypatch.setattr(_test_support, "API_KEY", None)
+    monkeypatch.delenv("DIGIEXPERT_API_KEY", raising=False)
 
     with pytest.raises(RuntimeError, match="API-key-protected"):
         _test_support.send_request(

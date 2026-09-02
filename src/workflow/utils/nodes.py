@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -10,8 +11,11 @@ from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openrouter import ChatOpenRouter
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 
-from helpers.coverage import audit_operation, plans_for_operation
+from helpers.coverage import (
+    audit_operation, plans_for_operation, required_body_fields, UNREACHABLE_STATUSES,
+)
 from workflow.utils.models import (
     State, ScenarioSpec, Scenarios, TestPlan, TestPlans, CoverageGaps,
 )
@@ -41,7 +45,9 @@ model = ChatOpenRouter(
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GOOGLE_MODEL="gemini-3.6-flash"
+# Overridable so a quota-exhausted model can be swapped without a code edit,
+# the same way rewrite_failed.py takes REWRITE_MODEL.
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.5-flash")
 llm = ChatGoogleGenerativeAI(
     model=GOOGLE_MODEL,
      google_api_key=GEMINI_API_KEY,
@@ -50,14 +56,29 @@ llm = ChatGoogleGenerativeAI(
 )
 
 
+# Groq — fast OpenAI-compatible inference for open models. The .env key is the
+# lowercase `groq_key`; fall back to the conventional GROQ_API_KEY too. Model is
+# overridable like GOOGLE_MODEL; the default is the strongest general model this
+# key currently serves (run `Groq().models.list()` to see the live lineup — it
+# rotates, and there is no Llama 3.x on it right now).
+GROQ_API_KEY = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+groq_llm = ChatGroq(
+    model=GROQ_MODEL,
+    api_key=GROQ_API_KEY,
+    temperature=0,
+    max_tokens=8000,
+)
 
 
 
-scenario_planner = llm.with_structured_output(Scenarios)
-test_builder = model.with_structured_output(TestPlans)
+
+
+scenario_planner = groq_llm.with_structured_output(Scenarios)
+test_builder =  groq_llm.with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
-coverage_auditor = llm.with_structured_output(CoverageGaps)
+coverage_auditor = groq_llm.with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and
@@ -98,6 +119,25 @@ class _AsyncTokenBucket:
 
 _rate_limiter = _AsyncTokenBucket(rate=MAX_CALLS_PER_SECOND, per=1.0)
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
+
+_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _run(coro):
+    """Run a coroutine on one event loop that lives as long as the process.
+
+    ``asyncio.run`` would open and close a loop per call, but the model clients
+    cache an async HTTP pool bound to the loop that first used them, and the
+    module-level semaphore/rate-limiter bind the same way. A second
+    ``asyncio.run`` in one process then dies with "Event loop is closed" — which
+    is exactly what the coverage fill pass does, since it invokes the builder a
+    second time after the builder node already ran.
+    """
+    global _loop
+    if _loop is None or _loop.is_closed():
+        _loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_loop)
+    return _loop.run_until_complete(coro)
 
 
 @lru_cache(maxsize=1)
@@ -172,6 +212,24 @@ def call_llm_1(state: State) -> dict:
     return {"scenarios": scenarios_per_operation}
 
 
+def _hollow_reason(plan: TestPlan, required: list[str]) -> str | None:
+    """Why a plan that sends no body at all cannot test what it claims to.
+
+    A ``null`` request_body means the model omitted the field rather than choosing
+    to send nothing — an explicit ``{}`` is how a deliberate empty-body test is
+    written. Left in the suite, such a plan looks like a real failure: the server
+    rejects on the *first* missing required field, not the one the test names, so
+    a "missing expertCode" test reports "missionReference is required" and the
+    reviewer burns a call working out that the plan, not the assertion, is wrong.
+    """
+    if plan.request_body is not None or not required:
+        return None
+    return (
+        f"request_body is null but the operation requires {', '.join(required)} — "
+        "the server would reject on the first missing field, not the one under test"
+    )
+
+
 async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestPlan]:
     async def _invoke():
         op_payload = json.dumps(_builder_operation(operation), ensure_ascii=False, default=str)
@@ -200,10 +258,21 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
         plan.requires_jwt = False
         plan.content_type = _content_type(operation)
 
-    return plans
+    required = required_body_fields(operation)
+    kept = []
+    for plan in plans:
+        reason = _hollow_reason(plan, required)
+        if reason:
+            print(f"Dropping {plan.name}: {reason}")
+            continue
+        kept.append(plan)
+
+    return kept
 
 
-async def _build_all(operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]) -> list[TestPlan]:
+async def _build_all(
+    operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]
+) -> tuple[list[TestPlan], int]:
     tasks = [
         _build_batch(operation, batch)
         for operation, scenarios in zip(operations, scenarios_per_operation)
@@ -212,12 +281,27 @@ async def _build_all(operations: list[dict], scenarios_per_operation: list[list[
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_plans = []
+    failed_batches = 0
     for result in results:
         if isinstance(result, Exception):
+            failed_batches += 1
             print(f"Dropping a batch after exhausting retries: {result}")
             continue
         all_plans.extend(result)
-    return all_plans
+    return all_plans, failed_batches
+
+
+def build_plans_with_failures(
+    operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]
+) -> tuple[list[TestPlan], int]:
+    """Build plans, and report how many batches died on the way.
+
+    A dropped batch is not a smaller suite by choice: it is scenarios the planner
+    asked for that no longer exist. A caller about to overwrite a previous
+    artifact has to know that before it writes, so the count is returned rather
+    than only printed.
+    """
+    return _run(_build_all(operations, scenarios_per_operation))
 
 
 def build_plans(
@@ -228,7 +312,7 @@ def build_plans(
     Shared by the builder node and the coverage fill pass so both get the same
     batching, retries, and deterministic method/path/content_type backfill.
     """
-    return asyncio.run(_build_all(operations, scenarios_per_operation))
+    return build_plans_with_failures(operations, scenarios_per_operation)[0]
 
 
 def call_llm_2(state: State) -> dict:
@@ -236,12 +320,20 @@ def call_llm_2(state: State) -> dict:
     scenarios_per_operation = state.get("scenarios") or []
     if not any(scenarios_per_operation):
         print("No scenarios found in state; skipping test builder.")
-        return {"plans": []}
+        return {"plans": [], "build_failures": 0}
     print("Invoking test builder LLM...")
 
-    all_plans = build_plans(state["operations"], scenarios_per_operation)
+    planned = sum(len(scenarios) for scenarios in scenarios_per_operation)
+    all_plans, failed_batches = build_plans_with_failures(
+        state["operations"], scenarios_per_operation
+    )
+    if failed_batches:
+        print(
+            f"WARNING: {failed_batches} builder batch(es) failed. Built {len(all_plans)} "
+            f"plan(s) from {planned} planned scenario(s) — this suite is incomplete."
+        )
 
-    return {"plans": all_plans}
+    return {"plans": all_plans, "build_failures": failed_batches}
 
 
 # --- coverage agent -------------------------------------------------------
@@ -276,6 +368,31 @@ async def _audit_batch(wrapper: dict, plans: list[dict], report: dict, unfilled:
 
     async with _semaphore:
         return await _call_with_retry(_invoke)
+
+
+def _gap_status(gap) -> int | None:
+    """The status code an LLM-reported gap is about, from its scenario or prose."""
+    if gap.scenario is not None:
+        return gap.scenario.target_status_code
+    match = re.search(r"\b([1-5]\d\d)\b", gap.detail or "")
+    return int(match.group(1)) if match else None
+
+
+def _rejected_reason(gap, checklist: dict) -> str | None:
+    """Why an LLM gap contradicts what the deterministic checklist already knows.
+
+    The prompt asks the model not to report these, but a prompt is not an
+    enforcement mechanism: the checklist has the facts, so it gets the last word.
+    """
+    if gap.kind == "status_code":
+        status = _gap_status(gap)
+        if status in UNREACHABLE_STATUSES:
+            return f"{status} is excluded (auth/infra, not request-driven)"
+        if status in (checklist.get("status_codes") or {}).get("covered", []):
+            return f"{status} is already covered"
+    if gap.kind == "happy_path" and checklist.get("happy_path"):
+        return "the suite already has a happy path"
+    return None
 
 
 def _matching_unfilled(gap, candidates: list[dict]) -> dict | None:
@@ -324,6 +441,10 @@ async def _audit_all(operations: list[dict], plans: list[dict]) -> list[tuple[di
             print("  Keeping the deterministic checklist result for this operation.")
         else:
             for gap in result.gaps:
+                rejected = _rejected_reason(gap, report["checklist"])
+                if rejected:
+                    print(f"  Ignoring an LLM gap for {wrapper.get('path', '')}: {rejected}")
+                    continue
                 scenario = gap.scenario.model_dump() if gap.scenario else None
                 # A gap the checklist found but couldn't name a condition for was
                 # handed to the model; its answer completes that entry rather than
@@ -392,7 +513,7 @@ def coverage_audit(state: State) -> dict:
 def _audit_all_sync(operations: list[dict], plans: list[dict]) -> list[tuple[dict, list[dict]]]:
     if not operations:
         return []
-    return asyncio.run(_audit_all(operations, plans))
+    return _run(_audit_all(operations, plans))
 
 
 def _unique_name(name: str, used: set[str]) -> str:
@@ -416,7 +537,13 @@ def fill_gaps(state: State) -> dict:
         return {"filled_count": 0}
 
     print(f"Filling {sum(len(s) for s in gap_scenarios)} coverage gap(s)...")
-    new_plans = build_plans(state["operations"], gap_scenarios)
+    new_plans, failed_batches = build_plans_with_failures(state["operations"], gap_scenarios)
+    if failed_batches:
+        print(
+            f"WARNING: {failed_batches} fill batch(es) failed, so only "
+            f"{len(new_plans)} of the {sum(len(s) for s in gap_scenarios)} gap scenario(s) "
+            "became plans."
+        )
 
     existing = list(state.get("plans") or [])
     used = {
@@ -428,7 +555,13 @@ def fill_gaps(state: State) -> dict:
         plan.name = _unique_name(plan.name, used)
 
     print(f"Added {len(new_plans)} plan(s) from the coverage audit.")
-    return {"plans": [*existing, *new_plans], "filled_count": len(new_plans)}
+    return {
+        "plans": [*existing, *new_plans],
+        "filled_count": len(new_plans),
+        # A partially failed build is still partial no matter where it happened,
+        # so persist_plans must know about fill losses before it overwrites.
+        "build_failures": (state.get("build_failures") or 0) + failed_batches,
+    }
 
 
 # def create_test_file(state:State):

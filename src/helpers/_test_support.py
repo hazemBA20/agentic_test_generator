@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import re
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
@@ -154,6 +155,38 @@ def split_multipart(body: dict | None) -> tuple[dict, list]:
     return fields, files
 
 
+def _form_parts(fields: dict) -> list:
+    """Plain form fields as file-less multipart parts, one part per list element."""
+    parts = []
+    for name, value in fields.items():
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if item is None:
+                continue
+            text = item if isinstance(item, str) else json.dumps(item)
+            parts.append((str(name), (None, text)))
+    return parts
+
+
+def _multipart_kwargs(fields: dict, files: list, headers: dict) -> dict:
+    """Build request kwargs that stay ``multipart/form-data`` in every case.
+
+    ``requests`` only emits a multipart Content-Type when ``files`` is non-empty;
+    given an empty list it downgrades to urlencoded, or sends no Content-Type at
+    all. A negative test that deliberately omits the file part would then be
+    rejected on media type (415) instead of having its body validated — the
+    request never reaches the check the test exists to make. Sending the plain
+    fields as file-less parts keeps the encoding correct, and a body with no
+    parts at all still gets an explicit boundary.
+    """
+    parts = [*files, *_form_parts(fields)]
+    if parts:
+        return {"files": parts}
+    boundary = uuid.uuid4().hex
+    headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+    return {"data": f"--{boundary}--\r\n".encode()}
+
+
 def _render_path(path: str, path_params: dict) -> str:
     """Substitute and URL-encode every OpenAPI `{parameter}` placeholder."""
     rendered = path
@@ -218,10 +251,10 @@ def send_request(
         "params": query_params or None,
         "timeout": 15,
     }
+    files: list = []
     if content_type == "multipart/form-data":
         fields, files = split_multipart(request_body)
-        kwargs["data"] = fields
-        kwargs["files"] = files
+        kwargs.update(_multipart_kwargs(fields, files, kwargs["headers"]))
     elif content_type == "application/x-www-form-urlencoded":
         kwargs["data"] = request_body
     else:
@@ -230,8 +263,8 @@ def send_request(
     try:
         return requests.request(**kwargs)
     finally:
-        for _, (_, fh, _) in kwargs.get("files", []):
-            fh.close()
+        for _, (_, handle, _) in files:
+            handle.close()
 
 
 def assert_response(actual, expected, context: str = ""):

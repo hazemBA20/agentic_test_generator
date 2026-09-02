@@ -78,6 +78,13 @@ class State(TypedDict, total=False):
     results: list[dict[str, Any]]
     review_log: list[dict[str, Any]]
     patched_count: int
+    # Batches the builder lost to quota/timeouts. Non-zero means `plans` is
+    # missing scenarios the planner asked for, so persisting it may destroy
+    # working tests rather than replace them.
+    build_failures: int
+    # Failures the reviewer never actually saw because the model call errored.
+    # Distinct from a reviewer judging a failure unfixable.
+    review_errors: int
     coverage: bool
     coverage_done: bool
     coverage_report_path: str

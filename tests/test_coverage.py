@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers.coverage import audit_operation, plans_for_operation
+from src.helpers.coverage import audit_operation, plans_for_operation, required_body_fields
 from src.workflow.utils.models import ScenarioSpec, TestPlan as PlanModel
 
 
@@ -250,7 +250,7 @@ def test_fill_gaps_appends_plans_and_suffixes_colliding_names(monkeypatch):
         PlanModel(**_plan(name="test_add_document_success", description="d", category="negative")),
         PlanModel(**_plan(name="test_brand_new", description="d", category="negative")),
     ]
-    monkeypatch.setattr(nodes, "build_plans", lambda operations, scenarios: built)
+    monkeypatch.setattr(nodes, "build_plans_with_failures", lambda operations, scenarios: (built, 0))
 
     scenario = ScenarioSpec(
         name="test_x", category="negative", description="d", target_status_code=400, focus="f"
@@ -273,9 +273,31 @@ def test_fill_gaps_is_a_no_op_without_scenarios(monkeypatch):
     def unexpected_build(*args, **kwargs):
         pytest.fail("the builder must not be called when there are no gap scenarios")
 
-    monkeypatch.setattr(nodes, "build_plans", unexpected_build)
+    monkeypatch.setattr(nodes, "build_plans_with_failures", unexpected_build)
 
     assert nodes.fill_gaps({"coverage_gap_scenarios": [[]]}) == {"filled_count": 0}
+
+
+def test_a_failed_fill_batch_is_carried_forward_as_a_build_failure(monkeypatch):
+    """A partial build is partial wherever it happened; persist_plans must hear about it."""
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    built = [PlanModel(**_plan(name="test_filled", description="d", category="negative"))]
+    monkeypatch.setattr(nodes, "build_plans_with_failures", lambda operations, scenarios: (built, 1))
+
+    scenario = ScenarioSpec(
+        name="test_x", category="negative", description="d", target_status_code=400, focus="f"
+    )
+    result = nodes.fill_gaps({
+        "operations": [_operation()],
+        "plans": [],
+        "coverage_gap_scenarios": [[scenario]],
+        "build_failures": 2,
+    })
+
+    assert result["filled_count"] == 1
+    assert result["build_failures"] == 3  # the builder's 2, plus this pass's 1
 
 
 def test_coverage_audit_survives_an_llm_failure_and_keeps_the_checklist(monkeypatch):
@@ -363,3 +385,118 @@ def test_llm_answer_to_a_handed_over_gap_completes_it_instead_of_duplicating_it(
     assert len(status_gaps) == 1
     assert status_gaps[0]["source"] == "checklist+llm"
     assert status_gaps[0]["scenario"]["name"] == "test_document_on_closed_mission"
+
+
+def test_llm_gaps_contradicting_the_checklist_are_ignored(monkeypatch):
+    """A prompt is not enforcement: the checklist has the facts, so it wins."""
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+    models = importlib.import_module("workflow.utils.models")
+
+    async def fake_audit(wrapper, plans, report, unfilled):
+        return models.CoverageGaps(gaps=[
+            # 403 is documented but auth is deliberately out of scope.
+            models.CoverageGap(kind="status_code", detail="403 Forbidden is not covered"),
+            # 200 is already targeted by the happy path.
+            models.CoverageGap(kind="status_code", detail="status 200 is not covered"),
+            # The checklist already confirmed a happy path exists.
+            models.CoverageGap(kind="happy_path", detail="no test sets convertToPdf=false"),
+            # ...while a genuine prose gap still gets through.
+            models.CoverageGap(kind="boundary", detail="empty data array is untested"),
+        ])
+
+    monkeypatch.setattr(nodes, "_audit_batch", fake_audit)
+
+    result = nodes.coverage_audit({"operations": [_operation()], "plans": [_plan()]})
+    gaps = result["coverage_report"][0]["gaps"]
+
+    assert [gap["detail"] for gap in gaps if gap["source"] != "checklist"] == [
+        "empty data array is untested"
+    ]
+    # The checklist's own 409 gap survives; the model's 403/200 claims do not.
+    assert [gap["status"] for gap in _by_kind(gaps, "status_code")] == [409]
+    assert not any(gap["source"] == "llm" for gap in _by_kind(gaps, "happy_path"))
+
+
+def test_the_builder_can_run_twice_in_one_process(monkeypatch):
+    """The fill pass calls build_plans after the builder node already did.
+
+    asyncio.run() would close the loop the model clients bound their connection
+    pool to, so the second call died with "Event loop is closed".
+    """
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    async def fake_batch(operation, batch):
+        # Touch both loop-bound primitives, as the real batch does.
+        async with nodes._semaphore:
+            await nodes._rate_limiter.acquire()
+        return [PlanModel(**_plan(description="d"))]
+
+    monkeypatch.setattr(nodes, "_build_batch", fake_batch)
+    scenario = ScenarioSpec(
+        name="test_x", category="negative", description="d", target_status_code=400, focus="f"
+    )
+
+    first = nodes.build_plans([_operation()], [[scenario]])
+    second = nodes.build_plans([_operation()], [[scenario]])
+
+    assert len(first) == 1 and len(second) == 1
+
+
+# --- hollow-plan gate -----------------------------------------------------
+
+def test_required_body_fields_resolves_through_a_ref():
+    assert required_body_fields(_operation()) == ["expertCode", "documentType"]
+    # An operation with no request body requires nothing, so nothing is hollow.
+    assert required_body_fields({"operation": {"responses": {}}, "definitions": {}}) == []
+
+
+def _built_names(monkeypatch, wrapper: dict, raw_plans: list[dict]) -> list[str]:
+    """Run the real _build_batch over canned model output; return surviving names.
+
+    Stubs the retry wrapper rather than the builder chain itself: the chain is a
+    frozen pydantic Runnable, and this seam still exercises the backfill loop and
+    the hollow-plan gate that follows it.
+    """
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    class _Message:
+        test_plans = [PlanModel(**plan) for plan in raw_plans]
+
+    async def fake_call_with_retry(_invoke, *args, **kwargs):
+        return _Message()
+
+    monkeypatch.setattr(nodes, "_call_with_retry", fake_call_with_retry)
+    scenario = ScenarioSpec(
+        name="test_x", category="negative", description="d", target_status_code=400, focus="f"
+    )
+    return [plan.name for plan in nodes.build_plans([wrapper], [[scenario]])]
+
+
+def test_a_plan_that_sends_no_body_is_dropped(monkeypatch):
+    """A null body cannot test one missing field: the server rejects on the first."""
+    hollow = _plan(name="test_missing_expert_code", category="negative", description="d")
+    hollow.pop("request_body")  # the model omitted it -> None
+
+    names = _built_names(monkeypatch, _operation(), [
+        hollow,
+        _plan(name="test_missing_expert_code_real", category="negative", description="d",
+              request_body={"documentType": "INVOICE"}),
+        _plan(name="test_empty_body", category="negative", description="d", request_body={}),
+    ])
+
+    assert "test_missing_expert_code" not in names      # null body -> dropped
+    assert "test_missing_expert_code_real" in names     # omits exactly one field
+    assert "test_empty_body" in names                   # explicit {} is deliberate
+
+
+def test_a_null_body_is_kept_when_the_operation_requires_nothing(monkeypatch):
+    bodyless = {"path": "/version", "method": "GET", "definitions": {},
+                "operation": {"responses": {"200": {"description": "OK"}}}}
+    plan = _plan(name="test_version", category="happy_path", description="d",
+                 path="/version", method="GET", expected_status_code=200)
+    plan.pop("request_body")
+
+    assert _built_names(monkeypatch, bodyless, [plan]) == ["test_version"]

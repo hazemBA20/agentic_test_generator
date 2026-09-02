@@ -21,6 +21,19 @@ def _plan_dict(plan) -> dict:
     return plan.model_dump() if hasattr(plan, "model_dump") else dict(plan)
 
 
+class PartialBuildError(RuntimeError):
+    """Raised when persisting a partial build would shrink an existing suite."""
+
+
+def _existing_plan_count(plans_path: Path) -> int:
+    """How many plans the file we are about to replace already holds."""
+    try:
+        existing = json.loads(plans_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    return len(existing) if isinstance(existing, list) else 0
+
+
 def ingest(state: State) -> dict:
     """Load the requested OpenAPI operation(s) into the graph state."""
     spec_path = state.get("spec_path") or str(ROOT / "spec.json")
@@ -40,11 +53,27 @@ def persist_plans(state: State) -> dict:
     """Persist plans as JSON; this is the durable source for generated tests."""
     plans_path = Path(state.get("plans_path") or DEFAULT_HELPERS / "test_plans.json")
     plans_path.parent.mkdir(parents=True, exist_ok=True)
-    plans_path.write_text(
-        json.dumps([_plan_dict(plan) for plan in state.get("plans") or []], indent=2),
-        encoding="utf-8",
-    )
-    print(f"Wrote {len(state.get('plans') or [])} test plan(s) to {plans_path}")
+    plans = [_plan_dict(plan) for plan in state.get("plans") or []]
+    payload = json.dumps(plans, indent=2)
+
+    # A batch the builder lost to quota or a timeout takes its scenarios with it.
+    # Writing what survived over a larger previous suite deletes working tests to
+    # no benefit and exits 0, so the run looks fine while the suite silently
+    # shrank. Quarantine the partial result and stop instead.
+    existing_count = _existing_plan_count(plans_path)
+    if state.get("build_failures") and existing_count > len(plans):
+        partial_path = plans_path.with_name(f"{plans_path.stem}.partial.json")
+        partial_path.write_text(payload, encoding="utf-8")
+        raise PartialBuildError(
+            f"The builder dropped {state['build_failures']} batch(es): only {len(plans)} "
+            f"plan(s) survived, fewer than the {existing_count} already in {plans_path}. "
+            f"Refusing to overwrite a larger suite with a partial one.\n"
+            f"The partial result is in {partial_path}. {plans_path} and the rendered "
+            f"suite are untouched — re-run once the model is reachable again."
+        )
+
+    plans_path.write_text(payload, encoding="utf-8")
+    print(f"Wrote {len(plans)} test plan(s) to {plans_path}")
     return {"plans_path": str(plans_path)}
 
 
@@ -105,16 +134,21 @@ def review_failures(state: State) -> dict:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(json.dumps(all_entries, indent=2, default=str), encoding="utf-8")
     skipped = sum(entry.get("action") == "skip" for entry in review_log)
-    print(
-        f"Reviewer pass {review_pass}: {patched_count} patch(es), {skipped} skip(s). "
-        f"Detailed log: {log_path}"
-    )
+    # A skip because the model call failed is not the reviewer deciding a failure
+    # is unfixable — it never saw the failure at all. Reporting both as "skip"
+    # makes an unreachable model look like a clean bill of health.
+    errored = sum(entry.get("source") == "error" for entry in review_log)
+    summary = f"Reviewer pass {review_pass}: {patched_count} patch(es), {skipped} skip(s)"
+    if errored:
+        summary += f", of which {errored} are model errors rather than judgments"
+    print(f"{summary}. Detailed log: {log_path}")
     return {
         "plans": revised,
         "patched_count": patched_count,
         "review_log": all_entries,
         "review_log_path": str(log_path),
         "review_pass": review_pass,
+        "review_errors": errored,
         "reviewed": True,
     }
 

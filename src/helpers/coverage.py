@@ -330,6 +330,17 @@ def audit_operation(wrapper: dict, plans: list[dict]) -> tuple[dict, list[dict]]
     return report, gaps
 
 
+def required_body_fields(wrapper: dict) -> list[str]:
+    """Required top-level request-body field names, with ``$ref``s resolved.
+
+    Exposed for the builder, which uses it to reject a plan that sends no body
+    at all for an operation that requires one.
+    """
+    operation = wrapper.get("operation") or {}
+    definitions = wrapper.get("definitions") or {}
+    return _required_fields(_body_schema(operation, definitions), definitions)
+
+
 def plans_for_operation(wrapper: dict, plans: list[dict]) -> list[dict]:
     """Plans belonging to one operation, matched on the backfilled method/path."""
     path, method = wrapper.get("path"), wrapper.get("method")
