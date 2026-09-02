@@ -12,11 +12,13 @@ def {{ name }}():
         path_params={{ path_params|pyrepr }},
         query_params={{ query_params|pyrepr }},
         headers={{ headers|pyrepr }},
+        requires_api_key={{ requires_api_key|pyrepr }},
+        requires_jwt={{ requires_jwt|pyrepr }},
     )
     assert resp.status_code == {{ expected_status_code|pyrepr }}, (
         f"expected {{ expected_status_code|pyrepr }}, got {resp.status_code} — body: {resp.text}"
     )
-{% if expected_response -%}
+{% if expected_response is not none -%}
 {{ assert_response_line(name, expected_response) }}
 {%- else -%}
     # no response body assertions for this scenario

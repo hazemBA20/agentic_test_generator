@@ -14,8 +14,10 @@ from pathlib import Path
 
 try:  # Supports both `python execute_plans.py` and package imports by LangGraph.
     from ._test_support import send_request, assert_response
+    from .plan_validation import validate_plans
 except ImportError:  # pragma: no cover - direct-script compatibility
     from _test_support import send_request, assert_response
+    from plan_validation import validate_plans
 
 ROOT = Path(__file__).resolve().parent
 BODY_SNIPPET = 800
@@ -33,6 +35,8 @@ def execute_plan(plan: dict) -> dict:
             path_params=plan.get("path_params") or {},
             query_params=plan.get("query_params") or {},
             headers=plan.get("headers") or {},
+            requires_api_key=plan.get("requires_api_key", False),
+            requires_jwt=plan.get("requires_jwt", False),
         )
     except Exception as e:
         return {
@@ -59,7 +63,7 @@ def execute_plan(plan: dict) -> dict:
         }
 
     expected_response = plan.get("expected_response")
-    if expected_response:
+    if expected_response is not None:
         try:
             assert_response(body_json, expected_response, context=f"{name}: ")
         except AssertionError as e:
@@ -81,6 +85,7 @@ def execute_plan(plan: dict) -> dict:
 
 
 def execute_plans(plans: list[dict]) -> list[dict]:
+    validate_plans(plans)
     return [execute_plan(plan) for plan in plans]
 
 

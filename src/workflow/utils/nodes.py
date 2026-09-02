@@ -3,6 +3,8 @@ import json
 import os
 import random
 import time
+from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -21,6 +23,7 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 MODEL_NAME = "deepseek/deepseek-v4-flash"
+FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
 model = ChatOpenRouter(
     model=MODEL_NAME,
@@ -89,6 +92,22 @@ _rate_limiter = _AsyncTokenBucket(rate=MAX_CALLS_PER_SECOND, per=1.0)
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
 
 
+@lru_cache(maxsize=1)
+def _available_fixture_keys() -> list[str]:
+    if not FIXTURE_DATA_PATH.exists():
+        return []
+    data = json.loads(FIXTURE_DATA_PATH.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{FIXTURE_DATA_PATH} must contain a JSON object")
+    return sorted(data)
+
+
+
+def _builder_operation(operation: dict) -> dict:
+    """Give the builder fixture names without exposing their configured values."""
+    return {**operation, "available_fixture_keys": _available_fixture_keys()}
+
+
 def _content_type(operation: dict) -> str:
     op = operation.get("operation", {})
     content = (op.get("requestBody") or {}).get("content", {})
@@ -145,7 +164,7 @@ def call_llm_1(state: State) -> dict:
 
 async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestPlan]:
     async def _invoke():
-        op_payload = json.dumps(operation, ensure_ascii=False, default=str)
+        op_payload = json.dumps(_builder_operation(operation), ensure_ascii=False, default=str)
         scenarios_payload = json.dumps([s.model_dump() for s in batch], ensure_ascii=False)
         user_content = TEST_BUILDER_USER_PROMPT.format(operation=op_payload, scenarios=scenarios_payload)
         return await test_builder.ainvoke(
@@ -167,6 +186,8 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
     for plan in plans:
         plan.path = operation.get("path", plan.path)
         plan.method = operation.get("method", plan.method)
+        plan.requires_api_key = True
+        plan.requires_jwt = False
         plan.content_type = _content_type(operation)
 
     return plans
@@ -201,18 +222,7 @@ def call_llm_2(state: State) -> dict:
         return {"plans": []}
 
     all_plans = asyncio.run(_build_all(operations, scenarios_per_operation))
-    names = [p.name for p in all_plans]
-    if len(names) != len(set(names)):
-        used: set[str] = set()
-        for plan in all_plans:
-            ident, n = plan.name, 2
-            while ident in used:
-                ident = f"{plan.name}_{n}"
-                n += 1
-            if ident != plan.name:
-                print(f"Duplicate plan name {plan.name!r} renamed to {ident}")
-                plan.name = ident
-            used.add(ident)
+
     return {"plans": all_plans}
 
 # def create_test_file(state:State):

@@ -21,9 +21,6 @@ def load_and_resolve_spec(spec_path: str) -> dict:
     return json.loads(json.dumps(resolved))
 
 
-import json
-
-
 def resolve_ref(spec: dict, ref: str) -> dict:
     """Resolve a local JSON pointer like '#/components/schemas/ErrorType'."""
     assert ref.startswith("#/"), f"Only local refs supported, got: {ref}"
@@ -70,6 +67,7 @@ def extract_operation_with_refs(spec: dict, path: str, method: str, op: dict) ->
         "method": method.upper(),
         "operation": op,           # still has $ref pointers
         "definitions": definitions,  # each unique referenced schema, resolved once
+        "security_schemes": spec.get("components", {}).get("securitySchemes", {}),
     }
 
 
@@ -105,6 +103,8 @@ def ingest_openapi_spec(spec_path: str) -> list[dict]:
             effective_op = dict(op)
             if merged_params:
                 effective_op["parameters"] = list(merged_params.values())
+            if "security" not in effective_op and "security" in spec:
+                effective_op["security"] = spec["security"]
             operations.append(extract_operation_with_refs(spec, path, method, effective_op))
 
     return operations
@@ -133,7 +133,7 @@ def pretty_print_operations(operations: list[dict]) -> None:
                 print(f"      - {p.get('name')} ({p.get('in')}, {req})")
 
         if op.get("requestBody"):
-            print(f"    Has request body: yes")
+            print("    Has request body: yes")
 
         if op.get("responses"):
             codes = ", ".join(op["responses"].keys())

@@ -1,8 +1,8 @@
 """Runtime support for generated API tests.
 
-Every request uses the X-API-KEY provided through the environment. Binary
-sentinels resolve to local fixture files without baking API-specific filenames
-into generated test plans.
+Generated company requests use the X-API-KEY provided through the environment.
+Binary sentinels resolve to local fixture files without baking API-specific
+filenames into generated test plans.
 """
 import json
 import mimetypes
@@ -20,6 +20,16 @@ API_KEY = os.environ.get("DIGIEXPERT_API_KEY")
 FIXTURES_DIR = Path(__file__).parent / "fixture"
 DATA_FIXTURES_PATH = FIXTURES_DIR / "test_data.json"
 GENERATED_SENTINEL = "<GENERATED>"
+PRESENT_SENTINELS = {GENERATED_SENTINEL, "<PRESENT>"}
+NON_NULL_SENTINEL = "<NON_NULL>"
+TYPE_SENTINELS = {
+    "<ANY_STRING>": (str, "string"),
+    "<ANY_INTEGER>": (int, "integer"),
+    "<ANY_NUMBER>": ((int, float), "number"),
+    "<ANY_BOOLEAN>": (bool, "boolean"),
+    "<ANY_OBJECT>": (dict, "object"),
+    "<ANY_ARRAY>": (list, "array"),
+}
 FILE_PREFIX = "<FILE:"
 FILE_SUFFIX = ">"
 DATA_PREFIX = "<FIXTURE:"
@@ -80,6 +90,11 @@ def resolve_test_data(value):
 
 def _resolve_fixture(sentinel: str) -> tuple[str, Path]:
     filename = sentinel[len(FILE_PREFIX):-len(FILE_SUFFIX)]
+    # Tolerate the common model shorthand <FILE:pdf> as <FILE:sample.pdf>
+    # rather than treating "pdf" as an extensionless filename and selecting an
+    # unrelated fallback file.
+    if re.fullmatch(r"[A-Za-z0-9]+", filename):
+        filename = f"sample.{filename.lower()}"
     requested = Path(filename)
     if requested.name != filename or filename in {"", ".", ".."}:
         raise ValueError(f"Unsafe fixture name {filename!r}")
@@ -141,11 +156,18 @@ def _render_path(path: str, path_params: dict) -> str:
     return rendered
 
 
-def _request_headers(extra_headers: dict) -> dict[str, str]:
-    """Merge operation headers without allowing generated data to replace the API key."""
-    headers = {"X-API-KEY": API_KEY}
+def _request_headers(
+    extra_headers: dict,
+    requires_api_key: bool,
+) -> dict[str, str]:
+    """Merge operation headers with the company API key when required."""
+    headers: dict[str, str] = {}
+    if requires_api_key:
+        if not API_KEY:
+            raise RuntimeError("DIGIEXPERT_API_KEY not set for an API-key-protected operation")
+        headers["X-API-KEY"] = API_KEY
     for name, value in extra_headers.items():
-        if str(name).lower() == "x-api-key":
+        if str(name).lower() in {"authorization", "x-api-key"}:
             continue
         if value is not None:
             headers[str(name)] = ",".join(map(str, value)) if isinstance(value, list) else str(value)
@@ -160,9 +182,10 @@ def send_request(
     path_params: dict | None = None,
     query_params: dict | None = None,
     headers: dict | None = None,
+    requires_api_key: bool = False,
+    requires_jwt: bool = False,
 ):
-    if not API_KEY:
-        raise RuntimeError("DIGIEXPERT_API_KEY not set")
+    """Send a request; ``requires_jwt`` is retained but ignored by company policy."""
     request_body = resolve_test_data(request_body)
     path_params = resolve_test_data(path_params or {})
     query_params = resolve_test_data(query_params or {})
@@ -172,7 +195,7 @@ def send_request(
     kwargs = {
         "method": method,
         "url": f"{BASE_URL}{rendered_path}",
-        "headers": _request_headers(headers),
+        "headers": _request_headers(headers, requires_api_key),
         "params": query_params or None,
         "timeout": 15,
     }
@@ -194,7 +217,46 @@ def assert_response(actual, expected, context: str = ""):
     _assert_value(actual, expected, context)
 
 
+def _assert_array_matcher(actual, options, path: str):
+    assert isinstance(actual, list), f"{path}: expected an array, got {actual!r}"
+    assert isinstance(options, dict), f"{path}: $array matcher must be an object"
+    if "min_items" in options:
+        assert len(actual) >= options["min_items"], (
+            f"{path}: expected at least {options['min_items']} item(s), got {len(actual)}"
+        )
+    if "max_items" in options:
+        assert len(actual) <= options["max_items"], (
+            f"{path}: expected at most {options['max_items']} item(s), got {len(actual)}"
+        )
+    if "contains" in options:
+        failures = []
+        for index, item in enumerate(actual):
+            try:
+                _assert_value(item, options["contains"], f"{path}[{index}].")
+                break
+            except AssertionError as exc:
+                failures.append(str(exc))
+        else:
+            detail = failures[0] if failures else "array is empty"
+            raise AssertionError(f"{path}: no array item matched contains ({detail})")
+
+
 def _assert_value(actual, expected, path: str):
+    if isinstance(expected, str) and expected in PRESENT_SENTINELS:
+        return
+    if expected == NON_NULL_SENTINEL:
+        assert actual is not None, f"{path}: expected a non-null value"
+        return
+    if isinstance(expected, str) and expected in TYPE_SENTINELS:
+        expected_type, type_name = TYPE_SENTINELS[expected]
+        matches = isinstance(actual, expected_type)
+        if expected in {"<ANY_INTEGER>", "<ANY_NUMBER>"} and isinstance(actual, bool):
+            matches = False
+        assert matches, f"{path}: expected {type_name}, got {actual!r}"
+        return
+    if isinstance(expected, dict) and set(expected) == {"$array"}:
+        _assert_array_matcher(actual, expected["$array"], path)
+        return
     if isinstance(expected, dict):
         assert isinstance(actual, dict), f"{path}: expected an object, got {actual!r}"
         for key, exp_v in expected.items():
@@ -207,8 +269,5 @@ def _assert_value(actual, expected, path: str):
         )
         for i, (a, e) in enumerate(zip(actual, expected)):
             _assert_value(a, e, f"{path}[{i}].")
-    elif expected == GENERATED_SENTINEL:
-        # assert actual is not None or actual==NULL, f"{path}: expected a server-generated value, got None"
-        return
     else:
         assert actual == expected, f"{path}: expected {expected!r}, got {actual!r}"

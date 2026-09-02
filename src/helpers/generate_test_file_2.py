@@ -15,6 +15,11 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+try:
+    from .plan_validation import validate_plans
+except ImportError:  # pragma: no cover - direct-script compatibility
+    from plan_validation import validate_plans
+
 ROOT = Path(__file__).resolve().parent
 TEMPLATES_DIR = ROOT / "templates"
 
@@ -77,6 +82,8 @@ def _render(env: Environment, plan: dict, name: str) -> str:
         path_params=plan.get("path_params") or {},
         query_params=plan.get("query_params") or {},
         headers=plan.get("headers") or {},
+        requires_api_key=plan.get("requires_api_key", False),
+        requires_jwt=plan.get("requires_jwt", False),
         expected_status_code=plan["expected_status_code"],
         expected_response=plan.get("expected_response"),
     )
@@ -87,6 +94,7 @@ def generate(plans_path: Path, out_path: Path):
     if not plans:
         print(f"No plans found in {plans_path} — nothing to generate.")
         return
+    validate_plans(plans)
 
     env = _make_env()
     used_names: set[str] = set()

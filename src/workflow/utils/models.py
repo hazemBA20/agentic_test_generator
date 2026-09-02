@@ -15,25 +15,28 @@ class Scenarios(BaseModel):
 
 
 class TestPlan(BaseModel):
-
-    name: str = Field(..., description="Short snake_case test function name, e.g. 'test_mission_add_missing_expert_code'")
+    name: str = Field(..., description="Short snake_case test function name")
     description: str = Field(..., description="What this test verifies")
     category: Literal["happy_path", "negative", "boundary"] = Field(..., description="Type of test case")
     method: str = Field(..., description="HTTP method, e.g. 'POST'")
-    path: str = Field(..., description="Endpoint path, e.g. '/experts/copilot/mission/add'")
-    request_body: dict[str, Any] | None = Field(None, description="Request payload to send")
-    path_params: dict[str, Any] = Field(default_factory=dict, description="Values substituted into {path} placeholders")
-    query_params: dict[str, Any] = Field(default_factory=dict, description="Query-string parameter values")
-    headers: dict[str, Any] = Field(default_factory=dict, description="Operation-specific request headers; excludes X-API-KEY")
-
+    path: str = Field(..., description="Endpoint path, e.g. '/customers/{customerId}'")
+    request_body: Any | None = Field(None, description="Request payload to send")
+    path_params: dict[str, Any] = Field(default_factory=dict)
+    query_params: dict[str, Any] = Field(default_factory=dict)
+    headers: dict[str, Any] = Field(default_factory=dict)
     expected_status_code: int = Field(..., description="Expected HTTP status code")
-    expected_response: dict[str, Any] | None = Field(None, description="Expected response body or key fields to assert on")
-
-    # The demo runner always attaches X-API-KEY.  Authentication is deliberately
-    # kept out of generated plans so every plan has the same execution contract.
-    content_type: Literal["application/json", "multipart/form-data"] = Field(
-        "application/json", description="Content-Type to send the request_body as"
+    expected_response: Any | None = Field(
+        None, description="Expected response body or declarative response matcher"
     )
+    missing_fixtures: list[str] = Field(
+        default_factory=list,
+        description="Suggested fixture keys required to make this plan executable",
+    )
+
+    # Backfilled deterministically from the operation rather than trusted to the LLM.
+    requires_api_key: bool = False
+    requires_jwt: bool = False
+    content_type: str = Field("application/json", description="Request Content-Type")
 
 
 class TestPlans(BaseModel):
@@ -42,21 +45,21 @@ class TestPlans(BaseModel):
     )
 
 
-class State(TypedDict):
-    spec_path: str | None
-    operation_index: int | None
-    run_all: bool | None
-    plans_path: str | None
-    tests_path: str | None
-    results_path: str | None
-    review_log_path: str | None
-    run_tests: bool | None
-    review: bool | None
-    reviewed: bool | None
-    review_pass: int | None
-    operations: list[dict] | None
-    scenarios: list[list[ScenarioSpec]] | None  # one sub-list per operation, aligned by index
-    plans: list[TestPlan] | list[dict] | None
-    results: list[dict] | None
-    patched_count: int | None
-    review_log: list[dict] | None
+class State(TypedDict, total=False):
+    operations: list[dict]
+    scenarios: list[list[ScenarioSpec]]
+    plans: list[TestPlan | dict[str, Any]]
+    spec_path: str
+    operation_index: int
+    run_all: bool
+    plans_path: str
+    tests_path: str
+    results_path: str
+    review_log_path: str
+    run_tests: bool
+    review: bool
+    reviewed: bool
+    review_pass: int
+    results: list[dict[str, Any]]
+    review_log: list[dict[str, Any]]
+    patched_count: int
