@@ -4,6 +4,9 @@
 
 def {{ name }}():
     """{{ description }}"""
+{% if invalid_reasons -%}
+    pytest.skip({{ invalid_reasons|pyrepr }})
+{% else -%}
     resp = send_request(
         method={{ method|pyrepr }},
         path={{ path|pyrepr }},
@@ -22,4 +25,5 @@ def {{ name }}():
 {{ assert_response_line(name, expected_response) }}
 {%- else -%}
     # no response body assertions for this scenario
+{%- endif %}
 {%- endif %}

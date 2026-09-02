@@ -28,8 +28,11 @@ def main(args):
     )
     print(f"Generated test suite: {state['tests_path']}")
     if args.run_tests or args.review:
-        passed = sum(result["passed"] for result in state.get("results") or [])
-        print(f"Final execution: {passed}/{len(state.get('results') or [])} passed")
+        results = state.get("results") or []
+        passed = sum(bool(result.get("passed")) for result in results)
+        skipped = sum(bool(result.get("skipped")) for result in results)
+        failed = len(results) - passed - skipped
+        print(f"Final execution: {passed} passed, {skipped} skipped, {failed} failed")
     if args.review:
         print(f"Reviewer patches: {state.get('patched_count', 0)}")
 

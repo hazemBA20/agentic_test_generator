@@ -62,8 +62,13 @@ def execute(state: State) -> dict:
     results_path = Path(state.get("results_path") or DEFAULT_HELPERS / "test_results.json")
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
-    passed = sum(result["passed"] for result in results)
-    print(f"Execution complete: {passed}/{len(results)} passed. Results: {results_path}")
+    passed = sum(bool(result.get("passed")) for result in results)
+    skipped = sum(bool(result.get("skipped")) for result in results)
+    failed = len(results) - passed - skipped
+    print(
+        f"Execution complete: {passed} passed, {skipped} skipped, {failed} failed. "
+        f"Results: {results_path}"
+    )
 
     # The first execution supplies evidence to the reviewer. Executions after a
     # review pass verify every recorded patch in the same audit log.
@@ -119,10 +124,17 @@ def _after_render(state: State) -> Literal["execute", "end"]:
 
 
 def _after_execute(state: State) -> Literal["review", "end"]:
-    has_failures = any(not result.get("passed") for result in state.get("results") or [])
+    has_failures = any(
+        not result.get("passed") and not result.get("skipped")
+        for result in state.get("results") or []
+    )
     if state.get("review") and not state.get("reviewed") and has_failures:
         return "review"
     return "end"
+
+
+def _after_review(state: State) -> Literal["persist", "end"]:
+    return "persist" if state.get("patched_count", 0) > 0 else "end"
 
 
 def compile_workflow():
@@ -142,5 +154,5 @@ def compile_workflow():
     graph.add_edge("persist_plans", "render")
     graph.add_conditional_edges("render", _after_render, {"execute": "execute", "end": END})
     graph.add_conditional_edges("execute", _after_execute, {"review": "review", "end": END})
-    graph.add_edge("review", "persist_plans")
+    graph.add_conditional_edges("review", _after_review, {"persist": "persist_plans", "end": END})
     return graph.compile()
