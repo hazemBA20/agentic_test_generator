@@ -20,13 +20,22 @@ def main(args):
             "tests_path": args.tests,
             "results_path": args.results,
             "review_log_path": args.review_log,
+            "coverage_report_path": args.coverage_report,
             "run_tests": args.run_tests or args.review,
             "review": args.review,
             "reviewed": False,
             "review_pass": 0,
+            "coverage": args.coverage,
+            "coverage_done": False,
         }
     )
     print(f"Generated test suite: {state['tests_path']}")
+    if args.coverage:
+        gaps = sum(len(entry.get("gaps") or []) for entry in state.get("coverage_report") or [])
+        print(
+            f"Coverage: {gaps} gap(s) reported, {state.get('filled_count', 0)} filled. "
+            f"Report: {state.get('coverage_report_path')}"
+        )
     if args.run_tests or args.review:
         results = state.get("results") or []
         passed = sum(bool(result.get("passed")) for result in results)
@@ -46,6 +55,8 @@ if __name__ == "__main__":
     parser.add_argument("--tests", default=str(HELPERS / "test.py"), help="Generated pytest output path")
     parser.add_argument("--results", default=str(HELPERS / "test_results.json"), help="Execution result JSON path")
     parser.add_argument("--review-log", default=str(HELPERS / "rewrite_log.json"), help="Reviewer audit-log path")
+    parser.add_argument("--coverage-report", default=str(HELPERS / "coverage_report.json"), help="Coverage report path")
     parser.add_argument("--run-tests", action="store_true", help="Execute generated plans against API_BASE_URL")
     parser.add_argument("--review", action="store_true", help="Run one LLM rewrite pass after execution failures")
+    parser.add_argument("--coverage", action="store_true", help="Audit generated coverage and fill gaps in one pass")
     main(parser.parse_args())

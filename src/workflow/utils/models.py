@@ -45,6 +45,21 @@ class TestPlans(BaseModel):
     )
 
 
+class CoverageGap(BaseModel):
+    kind: Literal[
+        "status_code", "required_field", "enum", "required_param",
+        "happy_path", "conditional", "boundary",
+    ] = Field(..., description="What kind of coverage is missing")
+    detail: str = Field(..., description="One sentence naming what the suite does not cover")
+    scenario: ScenarioSpec | None = Field(
+        None, description="A scenario that would close this gap, or null if it cannot be tested"
+    )
+
+
+class CoverageGaps(BaseModel):
+    gaps: list[CoverageGap] = Field(default_factory=list)
+
+
 class State(TypedDict, total=False):
     operations: list[dict]
     scenarios: list[list[ScenarioSpec]]
@@ -63,3 +78,9 @@ class State(TypedDict, total=False):
     results: list[dict[str, Any]]
     review_log: list[dict[str, Any]]
     patched_count: int
+    coverage: bool
+    coverage_done: bool
+    coverage_report_path: str
+    coverage_report: list[dict[str, Any]]
+    coverage_gap_scenarios: list[list[ScenarioSpec]]
+    filled_count: int

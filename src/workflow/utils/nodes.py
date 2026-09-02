@@ -11,12 +11,17 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openrouter import ChatOpenRouter
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from workflow.utils.models import State, ScenarioSpec, Scenarios, TestPlan, TestPlans
+from helpers.coverage import audit_operation, plans_for_operation
+from workflow.utils.models import (
+    State, ScenarioSpec, Scenarios, TestPlan, TestPlans, CoverageGaps,
+)
 from workflow.utils.prompts import (
     SCENARIO_PLANNER_SYSTEM_PROMPT,
     SCENARIO_PLANNER_USER_PROMPT,
     TEST_BUILDER_SYSTEM_PROMPT,
     TEST_BUILDER_USER_PROMPT,
+    COVERAGE_AUDITOR_SYSTEM_PROMPT,
+    COVERAGE_AUDITOR_USER_PROMPT,
 )
 
 load_dotenv()
@@ -50,6 +55,9 @@ llm = ChatGoogleGenerativeAI(
 
 scenario_planner = llm.with_structured_output(Scenarios)
 test_builder = model.with_structured_output(TestPlans)
+# Auditing coverage is a judgment task like planning, not payload construction,
+# so it shares the planner's model rather than the builder's.
+coverage_auditor = llm.with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and
@@ -212,20 +220,216 @@ async def _build_all(operations: list[dict], scenarios_per_operation: list[list[
     return all_plans
 
 
+def build_plans(
+    operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]
+) -> list[TestPlan]:
+    """Turn per-operation scenarios into plans, batched and rate-limited.
+
+    Shared by the builder node and the coverage fill pass so both get the same
+    batching, retries, and deterministic method/path/content_type backfill.
+    """
+    return asyncio.run(_build_all(operations, scenarios_per_operation))
+
+
 def call_llm_2(state: State) -> dict:
     """Builder node: turn each planned scenario into a concrete, executable TestPlan."""
-    if len(state.get("scenarios"))==0:
+    scenarios_per_operation = state.get("scenarios") or []
+    if not any(scenarios_per_operation):
         print("No scenarios found in state; skipping test builder.")
         return {"plans": []}
     print("Invoking test builder LLM...")
-    operations = state["operations"]
-    scenarios_per_operation = state.get("scenarios") or []
-    if not any(scenarios_per_operation):
-        return {"plans": []}
 
-    all_plans = asyncio.run(_build_all(operations, scenarios_per_operation))
+    all_plans = build_plans(state["operations"], scenarios_per_operation)
 
     return {"plans": all_plans}
+
+
+# --- coverage agent -------------------------------------------------------
+
+def _plan_digest(plan) -> dict:
+    """What a plan actually sends, for judging coverage by behaviour not by name."""
+    plan = plan.model_dump() if hasattr(plan, "model_dump") else dict(plan)
+    return {
+        "name": plan.get("name"),
+        "category": plan.get("category"),
+        "expected_status_code": plan.get("expected_status_code"),
+        "request_body": plan.get("request_body"),
+        "query_params": plan.get("query_params") or {},
+        "headers": plan.get("headers") or {},
+    }
+
+
+async def _audit_batch(wrapper: dict, plans: list[dict], report: dict, unfilled: list[dict]):
+    async def _invoke():
+        user_content = COVERAGE_AUDITOR_USER_PROMPT.format(
+            operation=json.dumps(wrapper, ensure_ascii=False, default=str),
+            plans=json.dumps([_plan_digest(p) for p in plans], ensure_ascii=False, default=str),
+            checklist=json.dumps(report["checklist"], ensure_ascii=False),
+            unfilled=json.dumps(unfilled, ensure_ascii=False) if unfilled else "(none)",
+        )
+        return await coverage_auditor.ainvoke(
+            [
+                SystemMessage(content=COVERAGE_AUDITOR_SYSTEM_PROMPT),
+                HumanMessage(content=user_content),
+            ]
+        )
+
+    async with _semaphore:
+        return await _call_with_retry(_invoke)
+
+
+def _matching_unfilled(gap, candidates: list[dict]) -> dict | None:
+    """The unfilled checklist gap an LLM gap is answering, if any.
+
+    The auditor is asked to echo a handed-over gap's kind and detail unchanged,
+    but a paraphrased detail shouldn't produce a duplicate entry — so status
+    gaps match on the code they target and the happy-path gap matches on kind.
+    """
+    for existing in candidates:
+        if existing.get("scenario") is not None or existing["kind"] != gap.kind:
+            continue
+        if gap.kind == "status_code":
+            target = gap.scenario.target_status_code if gap.scenario else None
+            if existing.get("status") == target or existing["detail"] == gap.detail:
+                return existing
+        elif gap.kind == "happy_path" or existing["detail"] == gap.detail:
+            return existing
+    return None
+
+
+async def _audit_all(operations: list[dict], plans: list[dict]) -> list[tuple[dict, list[dict]]]:
+    """Deterministic checklist per operation, then one LLM pass per operation."""
+    audits = []
+    for wrapper in operations:
+        report, gaps = audit_operation(wrapper, plans_for_operation(wrapper, plans))
+        audits.append((wrapper, report, gaps))
+
+    async def _for(wrapper, report, gaps):
+        unfilled = [
+            {"kind": gap["kind"], "detail": gap["detail"]}
+            for gap in gaps
+            if gap.get("scenario") is None
+        ]
+        return await _audit_batch(wrapper, plans_for_operation(wrapper, plans), report, unfilled)
+
+    results = await asyncio.gather(
+        *(_for(wrapper, report, gaps) for wrapper, report, gaps in audits),
+        return_exceptions=True,
+    )
+
+    audited = []
+    for (wrapper, report, gaps), result in zip(audits, results):
+        if isinstance(result, Exception):
+            print(f"Coverage audit failed for {wrapper.get('path', '')}: {result}")
+            print("  Keeping the deterministic checklist result for this operation.")
+        else:
+            for gap in result.gaps:
+                scenario = gap.scenario.model_dump() if gap.scenario else None
+                # A gap the checklist found but couldn't name a condition for was
+                # handed to the model; its answer completes that entry rather than
+                # standing as a second gap for the same thing.
+                answered = _matching_unfilled(gap, gaps)
+                if answered is not None:
+                    answered["scenario"] = scenario
+                    answered["source"] = "checklist+llm"
+                    continue
+                gaps.append({
+                    "kind": gap.kind,
+                    "detail": gap.detail,
+                    "scenario": scenario,
+                    "source": "llm",
+                })
+        for gap in gaps:
+            gap.setdefault("source", "checklist")
+        report["gaps"] = gaps
+        audited.append((report, gaps))
+    return audited
+
+
+def coverage_audit(state: State) -> dict:
+    """Coverage node: report what the generated suite does not cover.
+
+    Runs exactly once — ``coverage_done`` is set unconditionally so the second
+    trip through ``render`` after a fill pass cannot re-enter this node.
+    """
+    print("Auditing generated coverage...")
+    operations = state.get("operations") or []
+    plans = [p.model_dump() if hasattr(p, "model_dump") else dict(p) for p in state.get("plans") or []]
+
+    audited = _audit_all_sync(operations, plans)
+
+    report = [entry for entry, _ in audited]
+    gap_scenarios: list[list[ScenarioSpec]] = []
+    for _, gaps in audited:
+        scenarios = []
+        for gap in gaps:
+            if gap.get("scenario"):
+                try:
+                    scenarios.append(ScenarioSpec(**gap["scenario"]))
+                except Exception as e:
+                    print(f"  Discarding an unusable gap scenario: {e}")
+                    gap["scenario"] = None
+        gap_scenarios.append(scenarios)
+
+    total_gaps = sum(len(gaps) for _, gaps in audited)
+    fillable = sum(len(scenarios) for scenarios in gap_scenarios)
+    print(
+        f"Coverage audit: {total_gaps} gap(s) across {len(operations)} operation(s); "
+        f"{fillable} with a scenario to fill."
+    )
+    for entry, gaps in audited:
+        for gap in gaps:
+            marker = "fill" if gap.get("scenario") else "report"
+            print(f"  [{marker}] {entry['method']} {entry['path']} — {gap['kind']}: {gap['detail']}")
+
+    return {
+        "coverage_report": report,
+        "coverage_gap_scenarios": gap_scenarios,
+        "coverage_done": True,
+    }
+
+
+def _audit_all_sync(operations: list[dict], plans: list[dict]) -> list[tuple[dict, list[dict]]]:
+    if not operations:
+        return []
+    return asyncio.run(_audit_all(operations, plans))
+
+
+def _unique_name(name: str, used: set[str]) -> str:
+    """Keep a filled plan under a distinct name.
+
+    Duplicate plan names are treated as skips by the rewriter, so a gap plan
+    that collides with an existing one gets suffixed rather than dropped.
+    """
+    candidate, n = name, 2
+    while candidate in used:
+        candidate = f"{name}_gap{n}"
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
+def fill_gaps(state: State) -> dict:
+    """Build plans for the coverage gaps and merge them into the suite."""
+    gap_scenarios = state.get("coverage_gap_scenarios") or []
+    if not any(gap_scenarios):
+        return {"filled_count": 0}
+
+    print(f"Filling {sum(len(s) for s in gap_scenarios)} coverage gap(s)...")
+    new_plans = build_plans(state["operations"], gap_scenarios)
+
+    existing = list(state.get("plans") or [])
+    used = {
+        (plan.model_dump() if hasattr(plan, "model_dump") else plan).get("name")
+        for plan in existing
+    }
+    used.discard(None)
+    for plan in new_plans:
+        plan.name = _unique_name(plan.name, used)
+
+    print(f"Added {len(new_plans)} plan(s) from the coverage audit.")
+    return {"plans": [*existing, *new_plans], "filled_count": len(new_plans)}
+
 
 # def create_test_file(state:State):
 #     """Write a Python test file with one function per TestPlan."""

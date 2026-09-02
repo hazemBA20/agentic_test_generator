@@ -10,7 +10,7 @@ from helpers.generate_test_file import generate
 from helpers.parser import ingest_openapi_spec
 from helpers.rewrite_failed import rewrite_plans
 from workflow.utils.models import State
-from workflow.utils.nodes import call_llm_1, call_llm_2
+from workflow.utils.nodes import call_llm_1, call_llm_2, coverage_audit, fill_gaps
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -119,7 +119,38 @@ def review_failures(state: State) -> dict:
     }
 
 
-def _after_render(state: State) -> Literal["execute", "end"]:
+def coverage(state: State) -> dict:
+    """Audit the rendered suite against the spec and persist the report."""
+    result = coverage_audit(state)
+    report_path = Path(
+        state.get("coverage_report_path") or DEFAULT_HELPERS / "coverage_report.json"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(result.get("coverage_report") or [], indent=2, default=str), encoding="utf-8"
+    )
+    print(f"Coverage report: {report_path}")
+    return {**result, "coverage_report_path": str(report_path)}
+
+
+def _after_render(state: State) -> Literal["coverage", "execute", "end"]:
+    if state.get("coverage") and not state.get("coverage_done"):
+        return "coverage"
+    return "execute" if state.get("run_tests") else "end"
+
+
+def _after_coverage(state: State) -> Literal["fill", "execute", "end"]:
+    has_fillable = any(
+        scenarios for scenarios in state.get("coverage_gap_scenarios") or []
+    )
+    if has_fillable:
+        return "fill"
+    return "execute" if state.get("run_tests") else "end"
+
+
+def _after_fill(state: State) -> Literal["persist", "execute", "end"]:
+    if state.get("filled_count", 0) > 0:
+        return "persist"
     return "execute" if state.get("run_tests") else "end"
 
 
@@ -145,6 +176,8 @@ def compile_workflow():
     graph.add_node("builder", call_llm_2)
     graph.add_node("persist_plans", persist_plans)
     graph.add_node("render", render)
+    graph.add_node("coverage", coverage)
+    graph.add_node("fill_gaps", fill_gaps)
     graph.add_node("execute", execute)
     graph.add_node("review", review_failures)
     graph.add_edge(START, "ingest")
@@ -152,7 +185,18 @@ def compile_workflow():
     graph.add_edge("planner", "builder")
     graph.add_edge("builder", "persist_plans")
     graph.add_edge("persist_plans", "render")
-    graph.add_conditional_edges("render", _after_render, {"execute": "execute", "end": END})
+    graph.add_conditional_edges(
+        "render", _after_render,
+        {"coverage": "coverage", "execute": "execute", "end": END},
+    )
+    graph.add_conditional_edges(
+        "coverage", _after_coverage,
+        {"fill": "fill_gaps", "execute": "execute", "end": END},
+    )
+    graph.add_conditional_edges(
+        "fill_gaps", _after_fill,
+        {"persist": "persist_plans", "execute": "execute", "end": END},
+    )
     graph.add_conditional_edges("execute", _after_execute, {"review": "review", "end": END})
     graph.add_conditional_edges("review", _after_review, {"persist": "persist_plans", "end": END})
     return graph.compile()

@@ -61,3 +61,36 @@ TEST_BUILDER_USER_PROMPT = (
     "Scenarios to build — produce exactly one test case per scenario, in this order:\n{scenarios}\n\n"
     "Construct the concrete test case for each scenario."
 )
+
+COVERAGE_AUDITOR_SYSTEM_PROMPT = """You audit an existing API test suite against the operation it was generated from, and report only the coverage gaps that remain.
+
+A deterministic checklist has already been run. It compared the operation's schema against the suite and found every missing required-field negative, missing invalid-enum negative, missing required-param negative, and every documented status code no test targets. Those results are given to you. Do NOT re-report anything the checklist already covers.
+
+Your job is the coverage that only reading the operation's prose can reveal:
+- A conditional requirement stated in a description ("if X is INSURANCE then Y is required") where some branch has no test.
+- A documented edge case (empty array, blank string, min/max length, maximum item count) with no boundary test.
+- A distinct valid request shape — a different combination of conditional or optional fields — that no happy_path test exercises.
+- Some checklist gaps are handed to you with no scenario because naming the triggering condition needs the operation's prose (typically an untargeted status code, or a missing happy path). Propose a scenario for each of those, reusing the gap's kind and detail unchanged.
+
+For every gap you report, supply a scenario unless the gap genuinely cannot be reached by varying the request:
+- name: short snake_case identifier, prefixed with test_
+- category: happy_path, negative, or boundary
+- description: one sentence stating the input condition and why
+- target_status_code: must appear in this operation's documented responses
+- focus: short phrase naming the field, param, or condition under test
+
+Rules:
+- Set scenario to null when no request-level condition produces the outcome. Prefer null over inventing one.
+- Only use status codes present in this operation's response map. Never invent one.
+- The runner always sends its configured X-API-KEY. Never report missing, invalid, or alternative authentication as a gap.
+- Do not report a gap that an existing test already covers, even if that test is named unhelpfully — judge by what the request actually sends.
+- Do not invent stricter validation than the operation documents.
+- Report nothing if the suite is complete. An empty gap list is the correct answer for a well-covered operation."""
+
+COVERAGE_AUDITOR_USER_PROMPT = (
+    "Operation:\n{operation}\n\n"
+    "Tests that already exist (what each one actually sends):\n{plans}\n\n"
+    "Deterministic checklist result — already reported, do not repeat these:\n{checklist}\n\n"
+    "Checklist gaps still needing a scenario from you:\n{unfilled}\n\n"
+    "Report the remaining coverage gaps."
+)
