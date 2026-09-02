@@ -65,7 +65,7 @@ def _make_env() -> Environment:
 
 
 def _render(env: Environment, plan: dict, name: str) -> str:
-    template = env.get_template("test_function.j2")
+    template = env.get_template("test_functinon.j2")
     description = (plan.get("description") or "").replace('"""', "'''").replace("\n", " ")
     return template.render(
         name=name,
@@ -74,8 +74,6 @@ def _render(env: Environment, plan: dict, name: str) -> str:
         path=plan["path"],
         request_body=plan.get("request_body"),
         content_type=plan.get("content_type", "application/json"),
-        requires_api_key=bool(plan.get("requires_api_key", True)),
-        requires_jwt=bool(plan.get("requires_jwt", True)),
         expected_status_code=plan["expected_status_code"],
         expected_response=plan.get("expected_response"),
     )

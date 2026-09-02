@@ -1,66 +1,47 @@
+"""Run the complete OpenAPI test-generation workflow."""
 import argparse
-import json
-import sys
 from pathlib import Path
 
-from langgraph.graph import START, END, StateGraph
+from workflow.graph import compile_workflow
 
-from helpers.parser import ingest_openapi_spec
-from helpers.pretty_prints import pretty_print_test_plans
-from workflow.utils.models import State
-from workflow.utils.nodes import call_llm_1, call_llm_2
 
 ROOT = Path(__file__).resolve().parent.parent
+HELPERS = ROOT / "src" / "helpers"
 
 
-def build_graph():
-    graph_builder = StateGraph(State)
-    graph_builder.add_node("planner", call_llm_1)
-    graph_builder.add_node("builder", call_llm_2)
-    graph_builder.add_edge(START, "planner")
-    graph_builder.add_edge("planner", "builder")
-    graph_builder.add_edge("builder", END)
-    return graph_builder.compile()
-
-
-def run_one(workflow, op):
-    state = workflow.invoke({"operations": [op]
-                             ,"out_path": str(ROOT / "src" / "helpers" / "test_plans.json")})
-    return state.get("plans") or []
-
-
-def main(spec_path, index, run_all, out_path):
-    operations = ingest_openapi_spec(spec_path)
-    if not operations:
-        print("No operations found in spec.")
-        sys.exit(1)
-
-    workflow = build_graph()
-
-    if run_all:
-        all_plans = []
-        for i, op in enumerate(operations):
-            print(f"[{i + 1}/{len(operations)}] {op['method']} {op['path']}")
-            plans = run_one(workflow, op)
-            all_plans.extend(plans)
-    else:
-        all_plans = run_one(workflow, operations[index])
-        for plan in all_plans:
-            print(f"[{plan.category}] {plan.name} -> {plan.method} {plan.path} (expect {plan.expected_status_code}) ")
-
-    if out_path:
-        Path(out_path).write_text(
-            json.dumps([p.model_dump() for p in all_plans], indent=2, default=str),
-            encoding="utf-8",
-        )
-        print(f"\nWrote {len(all_plans)} test plans to {out_path}")
+def main(args):
+    workflow = compile_workflow()
+    state = workflow.invoke(
+        {
+            "spec_path": args.spec,
+            "operation_index": args.index,
+            "run_all": args.all,
+            "plans_path": args.out,
+            "tests_path": args.tests,
+            "results_path": args.results,
+            "review_log_path": args.review_log,
+            "run_tests": args.run_tests or args.review,
+            "review": args.review,
+            "reviewed": False,
+        }
+    )
+    print(f"Generated test suite: {state['tests_path']}")
+    if args.run_tests or args.review:
+        passed = sum(result["passed"] for result in state.get("results") or [])
+        print(f"Final execution: {passed}/{len(state.get('results') or [])} passed")
+    if args.review:
+        print(f"Reviewer patches: {state.get('patched_count', 0)}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate test plans from an OpenAPI spec.")
+    parser = argparse.ArgumentParser(description="Generate, execute, and optionally review OpenAPI API tests.")
     parser.add_argument("--spec", default=str(ROOT / "spec.json"), help="Path to OpenAPI spec")
-    parser.add_argument("--index", type=int, default=0, help="Index of the operation to plan (ignored with --all)")
-    parser.add_argument("--all", action="store_true", help="Run every operation in the spec, not just --index")
-    parser.add_argument("--out", default=str(ROOT / "src" / "helpers" / "test_plans.json"), help="Path to write the combined test_plans.json")
-    args = parser.parse_args()
-    main(args.spec, args.index, args.all, args.out)
+    parser.add_argument("--index", type=int, default=0, help="Operation index (ignored with --all)")
+    parser.add_argument("--all", action="store_true", help="Generate tests for every operation")
+    parser.add_argument("--out", default=str(HELPERS / "test_plans.json"), help="Plan JSON output path")
+    parser.add_argument("--tests", default=str(HELPERS / "test.py"), help="Generated pytest output path")
+    parser.add_argument("--results", default=str(HELPERS / "test_results.json"), help="Execution result JSON path")
+    parser.add_argument("--review-log", default=str(HELPERS / "rewrite_log.json"), help="Reviewer audit-log path")
+    parser.add_argument("--run-tests", action="store_true", help="Execute generated plans against API_BASE_URL")
+    parser.add_argument("--review", action="store_true", help="Run one LLM rewrite pass after execution failures")
+    main(parser.parse_args())

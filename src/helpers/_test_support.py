@@ -1,41 +1,22 @@
-"""Runtime support for the generated test suite. Not a test file itself —
-test.py imports these. Auth is lazy and cached: a JWT is only fetched the
-first time a test that actually needs one runs, so a login outage doesn't
-block tests (like /version) that don't require auth at all."""
+"""Runtime support for generated API tests.
+
+Every request uses the X-API-KEY provided through the environment. Binary
+sentinels resolve to local fixture files without baking API-specific filenames
+into generated test plans.
+"""
+import mimetypes
 import os
 from pathlib import Path
 
 import requests
 
-BASE_URL = os.environ.get("API_BASE_URL", "https://test.expert.digiclaim.tn/api")
+BASE_URL = os.environ.get("API_BASE_URL", "https://test.patch.digiclaim.tn/api")
 API_KEY = os.environ.get("DIGIEXPERT_API_KEY")
-LOGIN_USERNAME = os.environ.get("DIGIEXPERT_USERNAME")
-LOGIN_PASSWORD = os.environ.get("DIGIEXPERT_PASSWORD")
 
 FIXTURES_DIR = Path(__file__).parent / "fixture"
 GENERATED_SENTINEL = "<GENERATED>"
 FILE_PREFIX = "<FILE:"
 FILE_SUFFIX = ">"
-
-_token_cache: dict[str, str] = {}
-
-
-def _get_jwt() -> str:
-    if "token" in _token_cache:
-        return _token_cache["token"]
-    if not (LOGIN_USERNAME and LOGIN_PASSWORD):
-        raise RuntimeError("DIGIEXPERT_USERNAME / DIGIEXPERT_PASSWORD not set — needed to obtain a JWT")
-    resp = requests.post(
-        f"{BASE_URL}/core/external/login",
-        headers={"X-API-KEY": API_KEY},
-        json={"username": LOGIN_USERNAME, "password": LOGIN_PASSWORD},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    token = resp.json()["token"]["value"]
-    _token_cache["token"] = token
-    return token
-
 
 def _is_file_sentinel(value) -> bool:
     return isinstance(value, str) and value.startswith(FILE_PREFIX) and value.endswith(FILE_SUFFIX)
@@ -43,13 +24,25 @@ def _is_file_sentinel(value) -> bool:
 
 def _resolve_fixture(sentinel: str) -> tuple[str, Path]:
     filename = sentinel[len(FILE_PREFIX):-len(FILE_SUFFIX)]
-    path = FIXTURES_DIR / filename
+    requested = Path(filename)
+    if requested.name != filename or filename in {"", ".", ".."}:
+        raise ValueError(f"Unsafe fixture name {filename!r}")
+
+    path = FIXTURES_DIR / requested.name
     if not path.exists():
+        # Specs commonly name uploads differently. Reuse a representative local
+        # sample with the requested extension (or any sample as a final fallback)
+        # while preserving the requested filename in the multipart upload.
+        suffix = requested.suffix.lower()
+        candidates = sorted(FIXTURES_DIR.glob(f"*{suffix}")) if suffix else []
+        candidates += sorted(p for p in FIXTURES_DIR.iterdir() if p.is_file() and p not in candidates)
+        path = next(iter(candidates), None)
+    if path is None or not path.is_file():
         raise FileNotFoundError(
-            f"Test plan references fixture '{filename}' which doesn't exist at "
-            f"{path}. Add it under fixtures/."
+            f"Test plan references fixture '{filename}', but no sample files exist under "
+            f"{FIXTURES_DIR}. Add a representative file there."
         )
-    return filename, path
+    return requested.name, path
 
 
 def split_multipart(body: dict | None) -> tuple[dict, list]:
@@ -70,19 +63,15 @@ def split_multipart(body: dict | None) -> tuple[dict, list]:
             if not _is_file_sentinel(v):
                 continue
             filename, path = _resolve_fixture(v)
-            files.append((key, (filename, open(path, "rb"))))
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            files.append((key, (filename, open(path, "rb"), content_type)))
     return fields, files
 
 
-def send_request(method: str, path: str, request_body, content_type: str,
-                  requires_api_key: bool, requires_jwt: bool):
-    headers = {}
-    if requires_api_key:
-        if not API_KEY:
-            raise RuntimeError("DIGIEXPERT_API_KEY not set")
-        headers["X-API-KEY"] = API_KEY
-    if requires_jwt:
-        headers["Authorization"] = f"Bearer {_get_jwt()}"
+def send_request(method: str, path: str, request_body, content_type: str):
+    if not API_KEY:
+        raise RuntimeError("DIGIEXPERT_API_KEY not set")
+    headers = {"X-API-KEY": API_KEY}
 
     kwargs = {"method": method, "url": f"{BASE_URL}{path}", "headers": headers, "timeout": 15}
     if content_type == "multipart/form-data":
@@ -95,7 +84,7 @@ def send_request(method: str, path: str, request_body, content_type: str,
     try:
         return requests.request(**kwargs)
     finally:
-        for _, (_, fh) in kwargs.get("files", []):
+        for _, (_, fh, _) in kwargs.get("files", []):
             fh.close()
 
 

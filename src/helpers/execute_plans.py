@@ -12,7 +12,10 @@ import json
 import sys
 from pathlib import Path
 
-from _test_support import send_request, assert_response
+try:  # Supports both `python execute_plans.py` and package imports by LangGraph.
+    from ._test_support import send_request, assert_response
+except ImportError:  # pragma: no cover - direct-script compatibility
+    from _test_support import send_request, assert_response
 
 ROOT = Path(__file__).resolve().parent
 BODY_SNIPPET = 800
@@ -27,8 +30,6 @@ def execute_plan(plan: dict) -> dict:
             path=plan["path"],
             request_body=plan.get("request_body"),
             content_type=plan.get("content_type", "application/json"),
-            requires_api_key=bool(plan.get("requires_api_key", True)),
-            requires_jwt=bool(plan.get("requires_jwt", True)),
         )
     except Exception as e:
         return {

@@ -17,6 +17,8 @@ Coverage rules:
 - Only generate a scenario for a status code if you can name a concrete request-level condition (a field value, a missing field, a param) that would produce it. Skip status codes that depend on caller identity or authorization (e.g. a generic "forbidden") when the operation gives you no field or param whose value determines that outcome — those aren't reachable by varying the request body alone.
 - Do not target a fixed count. Stop once every required field, enum, and documented conditional is covered. Don't add near-duplicate scenarios — if two scenarios would use the same or an equivalent input value to reach the same status code, keep only one.
 - Only use status codes present in this operation's response map. Never invent one.
+- The test runner always sends its configured X-API-KEY. Do not create scenarios
+  for missing, invalid, or alternative authentication credentials.
 
 Keep every description to one sentence. No payload values, no JSON, no field values beyond what's needed to name the focus."""
 
@@ -37,7 +39,7 @@ For each test case, produce:
 - method: the operation's HTTP method
 - path: the operation's path
 - request_body: a concrete JSON request payload that matches the operation's request schema and realizes the scenario's focus (e.g. omit the field under test for a "missing field" scenario, use an invalid enum value for an "invalid enum" scenario). Use the schema's example values for every field not under test. Use null if the operation has no request body.
-  - For a field with format "binary" (a file upload), do NOT invent binary content or copy the schema's placeholder text. Use the literal string "<FILE:sample.pdf>" as that field's value (or as each element's value, if it's an array of files) — a downstream step resolves this to a real fixture file at test-run time.
+  - For a field with format "binary" (a file upload), use a literal "<FILE:sample.ext>" value (or one per array element). Choose ext from the schema's contentMediaType or allowed extension when available; otherwise use pdf for documents, jpg for images, and txt for unknown files. A downstream step resolves it to a local fixture at test-run time.
 - expected_status_code: the scenario's target_status_code, unchanged
 - expected_response: the key fields you'd assert on in the response.
   - For errors, match the operation's documented error schema's structure (which fields exist), not its example values. Do not invent fields that aren't in the schema.

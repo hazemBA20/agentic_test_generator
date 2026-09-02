@@ -11,7 +11,8 @@ scenario.
 
 ## How it works
 
-The workflow is a two-node LangGraph state machine:
+The workflow is a LangGraph pipeline. Live execution and the one-pass reviewer
+are opt-in so a normal generation run never calls the target API:
 
 ```
 OpenAPI spec
@@ -24,7 +25,13 @@ OpenAPI spec
 └────────────┘                              └────────────┘
                                                    │ TestPlan list
                                                    ▼
-                                     generate_test_file.py ──▶ test.py
+                                    persist plans → render pytest
+                                                       │
+                           --run-tests                ▼
+                              └──────────▶ execute plans → results JSON
+                                                   │
+                           --review (one pass)     ▼
+                              └──────────▶ rewrite plans → render → execute
 ```
 
 1. **Ingest** — `src/helpers/parser.py` loads the spec, resolves every `$ref`
@@ -39,19 +46,21 @@ OpenAPI spec
    (request body, expected status code, response-body assertions). The builder
    runs in batches with bounded concurrency, a shared token-bucket rate
    limiter, and exponential-backoff retries (`src/workflow/utils/nodes.py`).
-   Request `method`/`path`/auth/`content_type` are backfilled from the
+   Request `method`/`path`/`content_type` are backfilled from the
    operation deterministically rather than trusted from the model.
 4. **Render** — `src/helpers/generate_test_file.py` reads the plans JSON and
    writes `test.py`, one pytest function per plan, with safe unique identifiers
    and literal payloads. Generated output — don't hand-edit it; regenerate.
+5. **Execute and review (optional)** — `execute_plans.py` records live results.
+   `rewrite_failed.py` can make one constrained LLM patch pass, then the graph
+   regenerates and executes the affected suite once more.
 
 ## Project structure
 
 ```
 ├── spec.json                  # OpenAPI spec to generate from (gitignored)
 ├── src/
-│   ├── main.py                # CLI entry point: spec → test plans JSON
-│   ├── run_graph.py           # minimal single-operation runner
+│   ├── main.py                # CLI entry point for the complete workflow
 │   ├── workflow/
 │   │   ├── graph.py           # LangGraph wiring
 │   │   └── utils/
@@ -62,6 +71,8 @@ OpenAPI spec
 │   └── helpers/
 │       ├── parser.py          # OpenAPI ingestion + $ref resolution
 │       ├── generate_test_file.py  # plans JSON → test.py renderer
+│       ├── execute_plans.py   # plans → live execution results
+│       ├── rewrite_failed.py  # one constrained LLM rewrite pass
 │       ├── _test_support.py   # runtime support for generated tests
 │       ├── conftest.py        # fail-fast env validation for pytest
 │       ├── test_plans.json    # generated plans (gitignored)
@@ -89,17 +100,17 @@ top of `src/workflow/utils/nodes.py`.
 
 ## Usage
 
-Generate test plans for the first operation of `spec.json`:
+Generate and render tests for the first operation of `spec.json`:
 
 ```bash
 cd src
-python main.py                # uses spec.json, operation 0, writes test_plans.json
+python main.py
 ```
 
-Generate plans for every operation:
+Generate and render tests for every operation:
 
 ```bash
-python main.py --all --out src/helpers/test_plans.json
+python main.py --all
 ```
 
 Pick a specific operation:
@@ -108,11 +119,17 @@ Pick a specific operation:
 python main.py --index 2
 ```
 
-Render the plans into a pytest file:
+Run the generated plans against the configured API:
 
 ```bash
-cd src/helpers
-python generate_test_file.py  # reads test_plans.json → test.py
+python main.py --all --run-tests
+```
+
+Run one constrained reviewer pass after failures, then regenerate and execute
+the suite once more:
+
+```bash
+python main.py --all --review
 ```
 
 ### Running the generated tests
@@ -123,7 +140,7 @@ base URL. The default base URL and the env var names below are fixed in
 
 ```
 API_BASE_URL=<your server base url>
-.....
+DIGIEXPERT_API_KEY=<your API key>
 ```
 
 Then:
@@ -134,11 +151,12 @@ pytest src/helpers/test.py
 
 Support details in `_test_support.py`:
 
-- **Auth** — `X-API-KEY` is attached when a plan requires it; a JWT is
-  fetched lazily (and cached) only when a test actually needs one, so tests
-  that don't require auth don't depend on the login endpoint being up.
-- **File uploads** — a plan referencing `"<FILE:name>"` resolves to a real
-  file under `fixtures/` and is sent as multipart form data.
+- **Auth** — every generated request attaches `X-API-KEY`, read from
+  `DIGIEXPERT_API_KEY`. JWT authentication is not part of this demo.
+- **File uploads** — a plan referencing `"<FILE:sample.ext>"` resolves to a
+  local file under `fixture/`. Exact filenames are optional: the runner first
+  looks for a matching extension, then uses any available sample while keeping
+  the requested upload filename.
 - **Response assertions** — `assert_response` walks the expected dict; the
   sentinel `<GENERATED>` asserts a key exists without pinning its value, so
   server-generated ids/references don't cause brittle failures.
@@ -159,8 +177,8 @@ Support details in `_test_support.py`:
 ## Notes
 
 - This repo is an experimental test/agent harness under `tests/agentic`. It
-  is coupled to the API described by `spec.json` and its auth scheme
-  (`X-API-KEY` + bearer JWT). The spec itself is confidential and gitignored.
+  is coupled to the API described by `spec.json` and sends `X-API-KEY` with
+  every request. The spec itself is confidential and gitignored.
 - Known limitations and planned work are tracked in
   `NEXT_IMPROVEMENTS.md` (config management, logging, Jinja2 templating, unit
   tests).

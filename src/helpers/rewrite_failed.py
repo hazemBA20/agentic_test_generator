@@ -4,7 +4,7 @@ Only body/status failures are sent to the LLM. Unexpected 401/403/5xx status
 mismatches are skipped; a test that *expected* 401/403 and got it (kind=body)
 can still get an assertion patch.
 
-method, path, auth flags, content_type, and expected_status_code are never
+method, path, content_type, and expected_status_code are never
 changed. kind=body patches only expected_response; kind=status patches only
 request_body. Every skip/patch reason is written to rewrite_log.json for review.
 
