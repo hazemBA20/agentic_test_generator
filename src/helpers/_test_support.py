@@ -4,9 +4,13 @@ Every request uses the X-API-KEY provided through the environment. Binary
 sentinels resolve to local fixture files without baking API-specific filenames
 into generated test plans.
 """
+import json
 import mimetypes
 import os
+import re
+from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -14,12 +18,64 @@ BASE_URL = os.environ.get("API_BASE_URL", "https://test.patch.digiclaim.tn/api")
 API_KEY = os.environ.get("DIGIEXPERT_API_KEY")
 
 FIXTURES_DIR = Path(__file__).parent / "fixture"
+DATA_FIXTURES_PATH = FIXTURES_DIR / "test_data.json"
 GENERATED_SENTINEL = "<GENERATED>"
 FILE_PREFIX = "<FILE:"
 FILE_SUFFIX = ">"
+DATA_PREFIX = "<FIXTURE:"
+ENV_PREFIX = "<ENV:"
 
 def _is_file_sentinel(value) -> bool:
     return isinstance(value, str) and value.startswith(FILE_PREFIX) and value.endswith(FILE_SUFFIX)
+
+
+def _sentinel_key(value: str, prefix: str) -> str | None:
+    if not isinstance(value, str) or not value.startswith(prefix) or not value.endswith(FILE_SUFFIX):
+        return None
+    key = value[len(prefix):-len(FILE_SUFFIX)]
+    return key or None
+
+
+@lru_cache(maxsize=1)
+def _data_fixtures() -> dict:
+    if not DATA_FIXTURES_PATH.exists():
+        return {}
+    data = json.loads(DATA_FIXTURES_PATH.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{DATA_FIXTURES_PATH} must contain a JSON object")
+    return data
+
+
+def resolve_test_data(value):
+    """Resolve exact <FIXTURE:key> and <ENV:NAME> values recursively.
+
+    This works in request bodies as well as path, query, and header parameters.
+    It intentionally does not substitute inside arbitrary strings, avoiding
+    surprising changes to payload content.
+    """
+    if isinstance(value, dict):
+        return {key: resolve_test_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_test_data(item) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    fixture_key = _sentinel_key(value, DATA_PREFIX)
+    if fixture_key is not None:
+        fixtures = _data_fixtures()
+        if fixture_key not in fixtures:
+            raise KeyError(
+                f"Data fixture {fixture_key!r} is not defined in {DATA_FIXTURES_PATH}"
+            )
+        return resolve_test_data(fixtures[fixture_key])
+
+    env_name = _sentinel_key(value, ENV_PREFIX)
+    if env_name is not None:
+        env_value = os.environ.get(env_name)
+        if env_value is None:
+            raise RuntimeError(f"Environment fixture {env_name!r} is not set")
+        return env_value
+    return value
 
 
 def _resolve_fixture(sentinel: str) -> tuple[str, Path]:
@@ -68,12 +124,58 @@ def split_multipart(body: dict | None) -> tuple[dict, list]:
     return fields, files
 
 
-def send_request(method: str, path: str, request_body, content_type: str):
+def _render_path(path: str, path_params: dict) -> str:
+    """Substitute and URL-encode every OpenAPI `{parameter}` placeholder."""
+    rendered = path
+    for name, value in path_params.items():
+        token = "{" + str(name) + "}"
+        if token not in rendered:
+            raise ValueError(f"Path parameter {name!r} is not used by {path!r}")
+        if value is None:
+            raise ValueError(f"Path parameter {name!r} has no value")
+        rendered = rendered.replace(token, quote(str(value), safe=""))
+
+    missing = re.findall(r"\{([^{}]+)\}", rendered)
+    if missing:
+        raise ValueError(f"Missing path parameter value(s) for {', '.join(missing)}")
+    return rendered
+
+
+def _request_headers(extra_headers: dict) -> dict[str, str]:
+    """Merge operation headers without allowing generated data to replace the API key."""
+    headers = {"X-API-KEY": API_KEY}
+    for name, value in extra_headers.items():
+        if str(name).lower() == "x-api-key":
+            continue
+        if value is not None:
+            headers[str(name)] = ",".join(map(str, value)) if isinstance(value, list) else str(value)
+    return headers
+
+
+def send_request(
+    method: str,
+    path: str,
+    request_body,
+    content_type: str,
+    path_params: dict | None = None,
+    query_params: dict | None = None,
+    headers: dict | None = None,
+):
     if not API_KEY:
         raise RuntimeError("DIGIEXPERT_API_KEY not set")
-    headers = {"X-API-KEY": API_KEY}
+    request_body = resolve_test_data(request_body)
+    path_params = resolve_test_data(path_params or {})
+    query_params = resolve_test_data(query_params or {})
+    headers = resolve_test_data(headers or {})
+    rendered_path = _render_path(path, path_params)
 
-    kwargs = {"method": method, "url": f"{BASE_URL}{path}", "headers": headers, "timeout": 15}
+    kwargs = {
+        "method": method,
+        "url": f"{BASE_URL}{rendered_path}",
+        "headers": _request_headers(headers),
+        "params": query_params or None,
+        "timeout": 15,
+    }
     if content_type == "multipart/form-data":
         fields, files = split_multipart(request_body)
         kwargs["data"] = fields

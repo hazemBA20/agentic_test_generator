@@ -4,9 +4,9 @@ Only body/status failures are sent to the LLM. Unexpected 401/403/5xx status
 mismatches are skipped; a test that *expected* 401/403 and got it (kind=body)
 can still get an assertion patch.
 
-method, path, content_type, and expected_status_code are never
-changed. kind=body patches only expected_response; kind=status patches only
-request_body. Every skip/patch reason is written to rewrite_log.json for review.
+method, path, content_type, and expected_status_code are never changed.
+kind=body patches only expected_response; kind=status patches exactly one of the
+request input fields. Every skip/patch reason is written to rewrite_log.json.
 
 Usage (from this directory, after execute_plans.py):
     python rewrite_failed.py
@@ -50,9 +50,11 @@ Rules:
   Use the literal string "<GENERATED>" for volatile or free-text fields. Only
   assert exact values the server actually returned AND that the scenario cares
   about. Leave request_body null.
-- kind=status means the HTTP status was wrong. Patch only request_body so the
-  payload realizes the same scenario (missing field, invalid enum, etc.). Leave
-  expected_response null. Do not change expected_status_code.
+- kind=status means the HTTP status was wrong. Patch exactly one of request_body,
+  path_params, query_params, or headers so the request realizes the same scenario
+  (missing field, invalid enum, etc.). Leave all other patch fields and
+  expected_response null. Never include X-API-KEY in headers. Do not change
+  expected_status_code.
 - Do not invent new scenarios.
 - Keep file-upload values as "<FILE:sample.pdf>" / "<FILE:sample.jpg>" when a
   binary field is required.
@@ -72,6 +74,15 @@ class NamedPatch(BaseModel):
     reason: str = Field(..., description="One sentence why you patched or skipped")
     request_body: dict[str, Any] | None = Field(
         None, description="Replacement request body when kind=status and action=patch; else null"
+    )
+    path_params: dict[str, Any] | None = Field(
+        None, description="Replacement path parameters when kind=status and action=patch; else null"
+    )
+    query_params: dict[str, Any] | None = Field(
+        None, description="Replacement query parameters when kind=status and action=patch; else null"
+    )
+    headers: dict[str, Any] | None = Field(
+        None, description="Replacement non-auth headers when kind=status and action=patch; else null"
     )
     expected_response: dict[str, Any] | None = Field(
         None, description="Replacement response assertions when kind=body and action=patch; else null"
@@ -136,9 +147,19 @@ def _apply(plan: dict, patch: NamedPatch, kind: str) -> str | None:
         plan["expected_response"] = patch.expected_response
         return None
     if kind == "status":
-        if patch.request_body is None and plan.get("request_body") is not None:
-            return "status patch missing request_body"
-        plan["request_body"] = patch.request_body
+        replacements = {
+            "request_body": patch.request_body,
+            "path_params": patch.path_params,
+            "query_params": patch.query_params,
+            "headers": patch.headers,
+        }
+        supplied = [(field, value) for field, value in replacements.items() if value is not None]
+        if len(supplied) != 1:
+            return "status patch must supply exactly one request input field"
+        field, value = supplied[0]
+        if field == "headers" and any(str(key).lower() == "x-api-key" for key in value):
+            return "status patch attempted to replace X-API-KEY"
+        plan[field] = value
         return None
     return f"kind={kind} is not auto-fixed"
 
@@ -322,7 +343,14 @@ def rewrite_plans(plans: list[dict], results: list[dict]) -> tuple[list[dict], i
                 print(f"  skip {name}: {apply_skip}")
                 continue
 
-            field = "expected_response" if kind == "body" else "request_body"
+            if kind == "body":
+                field = "expected_response"
+            else:
+                field = next(
+                    name
+                    for name in ("request_body", "path_params", "query_params", "headers")
+                    if getattr(patch, name) is not None
+                )
             _log(
                 log_entries,
                 name=name,

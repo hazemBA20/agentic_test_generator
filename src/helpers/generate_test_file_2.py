@@ -74,6 +74,9 @@ def _render(env: Environment, plan: dict, name: str) -> str:
         path=plan["path"],
         request_body=plan.get("request_body"),
         content_type=plan.get("content_type", "application/json"),
+        path_params=plan.get("path_params") or {},
+        query_params=plan.get("query_params") or {},
+        headers=plan.get("headers") or {},
         expected_status_code=plan["expected_status_code"],
         expected_response=plan.get("expected_response"),
     )

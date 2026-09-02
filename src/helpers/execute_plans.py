@@ -30,6 +30,9 @@ def execute_plan(plan: dict) -> dict:
             path=plan["path"],
             request_body=plan.get("request_body"),
             content_type=plan.get("content_type", "application/json"),
+            path_params=plan.get("path_params") or {},
+            query_params=plan.get("query_params") or {},
+            headers=plan.get("headers") or {},
         )
     except Exception as e:
         return {
