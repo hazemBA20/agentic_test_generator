@@ -4,7 +4,6 @@ import os
 import random
 import time
 
-from anyio import Path
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openrouter import ChatOpenRouter
@@ -90,21 +89,6 @@ _rate_limiter = _AsyncTokenBucket(rate=MAX_CALLS_PER_SECOND, per=1.0)
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
 
 
-def _security_schemes(operation: dict) -> set[str]:
-    """Names of security schemes (e.g. 'JWTAuth', 'api_key') the operation
-    declares. A present-but-empty list (like /version) means explicitly no
-    security. A missing key falls back to requiring both, matching this
-    spec's global default."""
-    op = operation.get("operation", {})
-    security = op.get("security")
-    if security is None:
-        return {"JWTAuth", "api_key"}
-    schemes: set[str] = set()
-    for requirement in security:
-        schemes |= set(requirement.keys())
-    return schemes
-
-
 def _content_type(operation: dict) -> str:
     op = operation.get("operation", {})
     content = (op.get("requestBody") or {}).get("content", {})
@@ -183,9 +167,6 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
     for plan in plans:
         plan.path = operation.get("path", plan.path)
         plan.method = operation.get("method", plan.method)
-        schemes = _security_schemes(operation)
-        plan.requires_api_key = "api_key" in schemes
-        plan.requires_jwt = "JWTAuth" in schemes
         plan.content_type = _content_type(operation)
 
     return plans

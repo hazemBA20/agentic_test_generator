@@ -9,7 +9,7 @@ For each scenario, provide:
 
 Coverage rules:
 - One happy_path scenario per distinct valid request shape (e.g. each valid combination of conditional fields, not just one example).
-- One negative scenario per required field/param, for it being missing. Cover every required field individually — do not skip any.
+- One negative scenario per required request-body, query, or header field/param, for it being missing. Cover every required item individually — do not skip any. Do not create a "missing" path-parameter scenario: a missing path segment does not reach the same OpenAPI operation.
 - One negative scenario per enum field, for an invalid value.
 - One negative or boundary scenario per conditional requirement described in the operation (e.g. "if X then Y is required") — cover every branch of the conditional, not just one side.
 - A conditional stated as "use X to decide whether Y or Z is required" only tells you which field must be PRESENT per branch. Do not assume the operation also REJECTS the unused field being supplied anyway, or both being supplied together, unless the operation explicitly documents that as invalid — don't invent stricter validation than what's written.
@@ -17,6 +17,8 @@ Coverage rules:
 - Only generate a scenario for a status code if you can name a concrete request-level condition (a field value, a missing field, a param) that would produce it. Skip status codes that depend on caller identity or authorization (e.g. a generic "forbidden") when the operation gives you no field or param whose value determines that outcome — those aren't reachable by varying the request body alone.
 - Do not target a fixed count. Stop once every required field, enum, and documented conditional is covered. Don't add near-duplicate scenarios — if two scenarios would use the same or an equivalent input value to reach the same status code, keep only one.
 - Only use status codes present in this operation's response map. Never invent one.
+- The test runner always sends its configured X-API-KEY. Do not create scenarios
+  for missing, invalid, or alternative authentication credentials.
 
 Keep every description to one sentence. No payload values, no JSON, no field values beyond what's needed to name the focus."""
 
@@ -37,7 +39,11 @@ For each test case, produce:
 - method: the operation's HTTP method
 - path: the operation's path
 - request_body: a concrete JSON request payload that matches the operation's request schema and realizes the scenario's focus (e.g. omit the field under test for a "missing field" scenario, use an invalid enum value for an "invalid enum" scenario). Use the schema's example values for every field not under test. Use null if the operation has no request body.
-  - For a field with format "binary" (a file upload), do NOT invent binary content or copy the schema's placeholder text. Use the literal string "<FILE:sample.pdf>" as that field's value (or as each element's value, if it's an array of files) — a downstream step resolves this to a real fixture file at test-run time.
+  - path_params: values for `{name}` placeholders in the operation path. Supply every path parameter needed to reach this operation. Use `{}` only when the path has no placeholders.
+  - query_params: values for query parameters. Supply every required query parameter except when this scenario specifically tests it as missing or invalid. Use `{}` when none apply.
+  - headers: values for operation-specific header parameters. Supply every required header except when this scenario specifically tests it as missing or invalid. Never include X-API-KEY: the runner adds it automatically. Use `{}` when none apply.
+  - When a valid domain-specific value is required but the specification does not provide a usable example (for example an expert code or existing customer ID), use an exact `<FIXTURE:snake_case_key>` placeholder. The runner resolves it from `src/helpers/fixture/test_data.json`; for example, use `<FIXTURE:expert_code>` for an `expertCode` field.
+  - For a field with format "binary" (a file upload), use a literal "<FILE:sample.ext>" value (or one per array element). Choose ext from the schema's contentMediaType or allowed extension when available; otherwise use pdf for documents, jpg for images, and txt for unknown files. A downstream step resolves it to a local fixture at test-run time.
 - expected_status_code: the scenario's target_status_code, unchanged
 - expected_response: the key fields you'd assert on in the response.
   - For errors, match the operation's documented error schema's structure (which fields exist), not its example values. Do not invent fields that aren't in the schema.

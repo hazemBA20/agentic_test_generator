@@ -9,8 +9,9 @@ def {{ name }}():
         path={{ path|pyrepr }},
         request_body={{ request_body|pyrepr }},
         content_type={{ content_type|pyrepr }},
-        requires_api_key={{ requires_api_key }},
-        requires_jwt={{ requires_jwt }},
+        path_params={{ path_params|pyrepr }},
+        query_params={{ query_params|pyrepr }},
+        headers={{ headers|pyrepr }},
     )
     assert resp.status_code == {{ expected_status_code|pyrepr }}, (
         f"expected {{ expected_status_code|pyrepr }}, got {resp.status_code} — body: {resp.text}"

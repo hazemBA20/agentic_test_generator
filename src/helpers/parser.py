@@ -1,6 +1,5 @@
 import json
-from xml.etree.ElementPath import ops
-from xml.etree.ElementPath import ops
+
 import jsonref
 
 
@@ -83,7 +82,30 @@ def ingest_openapi_spec(spec_path: str) -> list[dict]:
         for method, op in path_item.items():
             if method.lower() not in HTTP_METHODS:
                 continue
-            operations.append(extract_operation_with_refs(spec, path, method, op))
+            # OpenAPI allows common parameters (notably `{id}` path parameters)
+            # on the path item. Operation-level parameters override matching
+            # path-level `(name, in)` pairs.
+            path_params = path_item.get("parameters", [])
+            op_params = op.get("parameters", [])
+            merged_params = {}
+            for parameter in [*path_params, *op_params]:
+                resolved_parameter = parameter
+                if isinstance(parameter, dict) and isinstance(parameter.get("$ref"), str):
+                    ref = parameter["$ref"]
+                    if ref.startswith("#/"):
+                        resolved_parameter = resolve_ref(spec, ref)
+                if (
+                    isinstance(resolved_parameter, dict)
+                    and "name" in resolved_parameter
+                    and "in" in resolved_parameter
+                ):
+                    merged_params[(resolved_parameter["name"], resolved_parameter["in"])] = parameter
+                else:
+                    merged_params[("$ref", json.dumps(parameter, sort_keys=True))] = parameter
+            effective_op = dict(op)
+            if merged_params:
+                effective_op["parameters"] = list(merged_params.values())
+            operations.append(extract_operation_with_refs(spec, path, method, effective_op))
 
     return operations
 def pretty_print_operations(operations: list[dict]) -> None:

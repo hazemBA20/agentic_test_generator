@@ -31,8 +31,9 @@ def $name():
         path=$path,
         request_body=$request_body,
         content_type=$content_type,
-        requires_api_key=$requires_api_key,
-        requires_jwt=$requires_jwt,
+        path_params=$path_params,
+        query_params=$query_params,
+        headers=$headers,
     )
     assert resp.status_code == $expected_status_code, (
         f"expected $expected_status_code, got {resp.status_code} \u2014 body: {resp.text}"
@@ -80,8 +81,9 @@ def _render(plan: dict, name: str) -> str:
         path=repr(plan["path"]),
         request_body=repr(plan.get("request_body")),
         content_type=repr(plan.get("content_type", "application/json")),
-        requires_api_key=str(bool(plan.get("requires_api_key", True))),
-        requires_jwt=str(bool(plan.get("requires_jwt", True))),
+        path_params=repr(plan.get("path_params") or {}),
+        query_params=repr(plan.get("query_params") or {}),
+        headers=repr(plan.get("headers") or {}),
         expected_status_code=repr(plan["expected_status_code"]),
         response_assert=response_assert,
     )
