@@ -14,6 +14,7 @@ Decision table (see tests/test_auth.py for each row):
 - ``type: http, scheme: bearer``                  -> bearer
 - ``type: http, scheme: basic``                   -> basic
 - ``type: oauth2 / openIdConnect``                -> bearer via token env/login
+- several of the above required together          -> multi (flags combine on the plan)
 - anything else (mutualTLS, ...)                  -> unsupported
 - spec silent about security                      -> api_key (the tool's original
   behavior; a redundant header on a public endpoint is harmless, omitting
@@ -87,16 +88,21 @@ def resolve_operation_auth(wrapper: dict) -> dict:
                 resolved.append(kinded)
             if not resolved:
                 continue
-            if len(resolved) > 1:
-                # Several credentials required together: not supported in v1.
-                # Another alternative may still satisfy the operation.
-                reason = (
-                    "requires multiple credentials together ("
-                    + ", ".join(kind for kind, _ in resolved) + ")"
-                )
-                continue
-            kind, extras = resolved[0]
-            return {"kind": kind, **extras}
+            if len(resolved) == 1:
+                kind, extras = resolved[0]
+                return {"kind": kind, **extras}
+            # Several credentials required together (e.g. bearer + api key):
+            # supported — the plan flags are independent booleans, and the
+            # runtime attaches whichever credentials are actually configured.
+            header = next(
+                (extra.get("header") for _, extra in resolved if extra.get("header")),
+                None,
+            )
+            return {
+                "kind": "multi",
+                "kinds": [kind for kind, _ in resolved],
+                "header": header or "X-API-KEY",
+            }
         return {"kind": "unsupported", "reason": reason}
 
     # Spec is silent: keep the tool's original behavior (attach the configured

@@ -40,8 +40,13 @@ def _static_bearer() -> str | None:
     return None
 
 
-def bearer_token() -> str:
-    """A bearer token: static from the env if set, else one login per process."""
+def bearer_token_or_none() -> str | None:
+    """The configured bearer token, or None when none is configured.
+
+    None means "attach nothing and warn", not "fail": specs are sometimes
+    stricter than the server behind them, and sending a fabricated token can
+    be worse than sending none. A configured login that *fails* stays loud.
+    """
     global _cached_bearer
     if _cached_bearer:
         return _cached_bearer
@@ -55,11 +60,24 @@ def bearer_token() -> str:
     username = os.environ.get("AUTH_USERNAME")
     password = os.environ.get("AUTH_PASSWORD")
     if not (token_url and username and password):
+        return None
+
+    return _login(token_url, username, password)
+
+
+def bearer_token() -> str:
+    """A bearer token, raising when nothing is configured (strict callers)."""
+    token = bearer_token_or_none()
+    if token is None:
         raise RuntimeError(
             "A bearer-protected operation needs a token: set AUTH_TOKEN, or "
             "AUTH_TOKEN_URL with AUTH_USERNAME and AUTH_PASSWORD to log in."
         )
+    return token
 
+
+def _login(token_url: str, username: str, password: str) -> str:
+    global _cached_bearer
     response = requests.request(
         "POST", token_url, json={"username": username, "password": password}, timeout=15,
     )

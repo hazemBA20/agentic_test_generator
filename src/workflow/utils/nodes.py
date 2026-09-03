@@ -246,12 +246,16 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
     # method/path are deterministic from the operation itself, so don't trust
     # the model to copy them correctly — backfill regardless of what it said.
     # Same for auth: resolved from the operation's security, not the model.
+    kinds = set(
+        auth.get("kinds")
+        or ([auth["kind"]] if auth.get("kind") in {"api_key", "bearer", "basic"} else [])
+    )
     for plan in plans:
         plan.path = operation.get("path", plan.path)
         plan.method = operation.get("method", plan.method)
-        plan.requires_api_key = auth["kind"] == "api_key"
-        plan.requires_jwt = auth["kind"] == "bearer"
-        plan.requires_basic = auth["kind"] == "basic"
+        plan.requires_api_key = "api_key" in kinds
+        plan.requires_jwt = "bearer" in kinds
+        plan.requires_basic = "basic" in kinds
         plan.api_key_header = auth.get("header") or "X-API-KEY"
         plan.content_type = _content_type(operation)
 

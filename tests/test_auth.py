@@ -84,12 +84,26 @@ def test_alternatives_fall_through_to_a_satisfiable_one():
     assert resolve_operation_auth(wrapper) == {"kind": "bearer"}
 
 
-def test_multi_credential_alternative_is_skipped_when_another_exists():
+def test_multi_credential_requirement_is_supported():
+    """bearer + api key together: both flags land on the plan, each is attached."""
     wrapper = _wrapper(
-        [{"a": [], "b": []}, {"bearer": []}],
+        [{"a": [], "b": []}],
         {
             "a": {"type": "http", "scheme": "bearer"},
             "b": {"type": "apiKey", "in": "header", "name": "X-K"},
+        },
+    )
+    result = resolve_operation_auth(wrapper)
+    assert result["kind"] == "multi"
+    assert sorted(result["kinds"]) == ["api_key", "bearer"]
+    assert result["header"] == "X-K"
+
+
+def test_multi_with_an_unsupported_member_falls_through_to_an_alternative():
+    wrapper = _wrapper(
+        [{"a": [], "ghost": []}, {"bearer": []}],
+        {
+            "a": {"type": "http", "scheme": "bearer"},
             "bearer": {"type": "http", "scheme": "bearer"},
         },
     )
@@ -130,6 +144,44 @@ def test_backfill_sets_plan_auth_from_the_operation(monkeypatch):
 
     assert plan.requires_jwt is True
     assert plan.requires_api_key is False
+    assert plan.api_key_header == "X-API-KEY"
+
+
+def test_backfill_combines_a_multi_credential_requirement(monkeypatch):
+    """The real spec case: JWTAuth + api_key together on one operation."""
+    import importlib
+    from pathlib import Path
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+    models = importlib.import_module("workflow.utils.models")
+
+    class _Message:
+        test_plans = [
+            models.TestPlan(name="test_x", description="d", category="negative",
+                            method="POST", path="/x", expected_status_code=400)
+        ]
+
+    async def fake_retry(invoke_fn):
+        return _Message()
+
+    monkeypatch.setattr(nodes, "_call_with_retry", fake_retry)
+    wrapper = _wrapper(
+        [{"JWTAuth": [], "api_key": []}],
+        {
+            "JWTAuth": {"type": "http", "scheme": "bearer"},
+            "api_key": {"type": "apiKey", "in": "header", "name": "X-API-KEY"},
+        },
+    )
+    scenario = models.ScenarioSpec(
+        name="test_x", category="negative", description="d",
+        target_status_code=400, focus="f",
+    )
+
+    plan = nodes.build_plans([wrapper], [[scenario]])[0]
+
+    assert plan.requires_jwt is True
+    assert plan.requires_api_key is True
     assert plan.api_key_header == "X-API-KEY"
 
 
@@ -174,6 +226,16 @@ def test_bearer_token_comes_from_a_static_env(monkeypatch):
     monkeypatch.setenv("AUTH_TOKEN", "static-tok")
     captured = _send(monkeypatch, requires_jwt=True)
     assert captured["headers"]["Authorization"] == "Bearer static-tok"
+
+
+def test_unconfigured_bearer_is_omitted_not_fatal(monkeypatch):
+    """Specs are sometimes stricter than the server: omit and warn, don't fail."""
+    monkeypatch.setattr(auth, "_cached_bearer", None)
+    for name in ("AUTH_TOKEN", "API_JWT", "DIGIEXPERT_JWT",
+                 "AUTH_TOKEN_URL", "AUTH_USERNAME", "AUTH_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    captured = _send(monkeypatch, requires_jwt=True)
+    assert "Authorization" not in captured["headers"]
 
 
 def test_bearer_via_login_flow_runs_once_and_is_cached(monkeypatch):

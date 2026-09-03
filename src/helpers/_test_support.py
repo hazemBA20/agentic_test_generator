@@ -216,6 +216,22 @@ def _render_path(path: str, path_params: dict) -> str:
     return rendered
 
 
+_no_bearer_warned = False
+
+
+def _warn_no_bearer_once() -> None:
+    """Say once per process that a required bearer was omitted, not silently."""
+    global _no_bearer_warned
+    if not _no_bearer_warned:
+        _no_bearer_warned = True
+        print(
+            "WARNING: an operation requires bearer auth, but no credential is "
+            "configured (AUTH_TOKEN, or AUTH_TOKEN_URL + AUTH_USERNAME + "
+            "AUTH_PASSWORD). Sending the request without Authorization — set "
+            "them if the server actually enforces it."
+        )
+
+
 def _request_headers(
     extra_headers: dict,
     requires_api_key: bool,
@@ -238,7 +254,11 @@ def _request_headers(
             )
         headers[api_key_header] = api_key
     if requires_jwt:
-        headers["Authorization"] = f"Bearer {auth.bearer_token()}"
+        token = auth.bearer_token_or_none()
+        if token is None:
+            _warn_no_bearer_once()
+        else:
+            headers["Authorization"] = f"Bearer {token}"
     for name, value in extra_headers.items():
         if str(name).lower() in {"authorization", "x-api-key"}:
             continue
