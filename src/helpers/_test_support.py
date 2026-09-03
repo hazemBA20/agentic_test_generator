@@ -16,6 +16,11 @@ from urllib.parse import quote
 import requests
 from dotenv import load_dotenv
 
+try:  # Generated suites import this module top-level; package imports also exist.
+    from . import auth
+except ImportError:  # pragma: no cover - direct-script compatibility
+    import auth
+
 # This module is imported before the workflow's own load_dotenv() runs, so it
 # loads .env itself — otherwise a key set only in .env is invisible here.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -38,15 +43,6 @@ def _base_url() -> str:
             "Export it in your shell or add it to .env at the repo root."
         )
     return base
-
-
-def _api_key() -> str | None:
-    """Read the key at request time, not import time.
-
-    Generated suites are also imported directly by pytest, where the key may be
-    exported after this module is first loaded.
-    """
-    return os.environ.get("DIGIEXPERT_API_KEY")
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixture"
@@ -223,17 +219,26 @@ def _render_path(path: str, path_params: dict) -> str:
 def _request_headers(
     extra_headers: dict,
     requires_api_key: bool,
+    requires_jwt: bool = False,
+    api_key_header: str = "X-API-KEY",
 ) -> dict[str, str]:
-    """Merge operation headers with the company API key when required."""
+    """Merge plan headers with the credentials the plan's auth requires.
+
+    Credentials come from the environment (helpers/auth.py), never from the
+    plan: the planner is told not to include them, and anything it did include
+    under a credential name is dropped here.
+    """
     headers: dict[str, str] = {}
     if requires_api_key:
-        api_key = _api_key()
+        api_key = auth.api_key()
         if not api_key:
             raise RuntimeError(
                 "DIGIEXPERT_API_KEY not set for an API-key-protected operation. "
                 "Export it in your shell or add it to .env at the repo root."
             )
-        headers["X-API-KEY"] = api_key
+        headers[api_key_header] = api_key
+    if requires_jwt:
+        headers["Authorization"] = f"Bearer {auth.bearer_token()}"
     for name, value in extra_headers.items():
         if str(name).lower() in {"authorization", "x-api-key"}:
             continue
@@ -252,8 +257,10 @@ def send_request(
     headers: dict | None = None,
     requires_api_key: bool = False,
     requires_jwt: bool = False,
+    requires_basic: bool = False,
+    api_key_header: str = "X-API-KEY",
 ):
-    """Send a request; ``requires_jwt`` is retained but ignored by company policy."""
+    """Send a request with the credentials the plan's resolved auth requires."""
     request_body = resolve_test_data(request_body)
     path_params = resolve_test_data(path_params or {})
     query_params = resolve_test_data(query_params or {})
@@ -263,10 +270,12 @@ def send_request(
     kwargs = {
         "method": method,
         "url": f"{_base_url()}{rendered_path}",
-        "headers": _request_headers(headers, requires_api_key),
+        "headers": _request_headers(headers, requires_api_key, requires_jwt, api_key_header),
         "params": query_params or None,
         "timeout": 15,
     }
+    if requires_basic:
+        kwargs["auth"] = auth.basic_credentials()
     files: list = []
     if content_type == "multipart/form-data":
         fields, files = split_multipart(request_body)

@@ -87,6 +87,8 @@ def _render(env: Environment, plan: dict, name: str, issues: list[str]) -> str:
         headers=plan.get("headers") or {},
         requires_api_key=plan.get("requires_api_key", False),
         requires_jwt=plan.get("requires_jwt", False),
+        requires_basic=plan.get("requires_basic", False),
+        api_key_header=plan.get("api_key_header", "X-API-KEY"),
         expected_status_code=plan.get("expected_status_code"),
         expected_response=plan.get("expected_response"),
     )

@@ -88,6 +88,25 @@ API_BASE_URL=https://api.example.com
 DIGIEXPERT_API_KEY=...
 ```
 
+### Authentication
+
+Auth requirements come from the spec's `security` / `securitySchemes`, and the
+runner attaches credentials itself — tests never carry or test them:
+
+- **Public** operations (`security: []`) get no credential.
+- **`type: apiKey`** operations get the configured key under the scheme's
+  declared header (`DIGIEXPERT_API_KEY`).
+- **`type: http, scheme: bearer`** and OAuth/OpenID operations attach
+  `Authorization: Bearer <token>` from `AUTH_TOKEN`, or from a one-time login
+  (`AUTH_TOKEN_URL` + `AUTH_USERNAME`/`AUTH_PASSWORD`; the token is read from
+  `access_token`/`token`/`jwt` in the response).
+- **HTTP basic** operations use `AUTH_BASIC_USERNAME`/`AUTH_BASIC_PASSWORD`.
+
+Auth is never tested: 401/403 are treated as infrastructure statuses, and an
+operation whose scheme cannot be satisfied has its scenarios dropped with a
+printed reason instead of generating guaranteed-401 tests. See
+[`.env.example`](.env.example).
+
 Then run the generated tests:
 
 ```bash

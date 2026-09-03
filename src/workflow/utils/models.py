@@ -33,9 +33,14 @@ class TestPlan(BaseModel):
         description="Suggested fixture keys required to make this plan executable",
     )
 
-    # Backfilled deterministically from the operation rather than trusted to the LLM.
+    # Backfilled deterministically from the operation's security rather than
+    # trusted to the LLM. The runner attaches credentials; plans never carry them.
     requires_api_key: bool = False
     requires_jwt: bool = False
+    requires_basic: bool = False
+    api_key_header: str = Field(
+        "X-API-KEY", description="Header carrying the API key when requires_api_key is set"
+    )
     content_type: str = Field("application/json", description="Request Content-Type")
 
 

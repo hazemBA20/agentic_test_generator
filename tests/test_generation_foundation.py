@@ -371,7 +371,10 @@ def test_request_without_a_base_url_is_refused(monkeypatch):
         _test_support.send_request("GET", "/health", None, "application/json")
 
 
-def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
+def test_bearer_and_api_key_are_attached_per_plan(monkeypatch):
+    """requires_jwt is honored now: bearer from env, key under the plan's header."""
+    from src.helpers import auth as auth_module
+
     captured = {}
 
     def fake_request(**kwargs):
@@ -381,20 +384,25 @@ def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
     monkeypatch.setattr(_test_support.requests, "request", fake_request)
     monkeypatch.setenv("API_BASE_URL", "https://example.test/api")
     monkeypatch.setenv("DIGIEXPERT_API_KEY", "company-api-key")
-    monkeypatch.setenv("API_JWT", "legacy-jwt")
-    monkeypatch.setenv("DIGIEXPERT_JWT", "legacy-jwt")
+    monkeypatch.setenv("AUTH_TOKEN", "static-token")
+    monkeypatch.delenv("API_JWT", raising=False)
+    monkeypatch.delenv("DIGIEXPERT_JWT", raising=False)
+    monkeypatch.setattr(auth_module, "_cached_bearer", None)
 
     _test_support.send_request(
         "GET",
         "/private",
         None,
         "application/json",
-        headers={"Authorization": "Bearer plan-jwt"},
         requires_api_key=True,
         requires_jwt=True,
+        api_key_header="X-Api-Key",
     )
 
-    assert captured["headers"] == {"X-API-KEY": "company-api-key"}
+    assert captured["headers"] == {
+        "X-Api-Key": "company-api-key",
+        "Authorization": "Bearer static-token",
+    }
 
 
 def test_protected_request_reports_missing_credential(monkeypatch):

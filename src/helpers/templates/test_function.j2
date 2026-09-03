@@ -17,6 +17,8 @@ def {{ name }}():
         headers={{ headers|pyrepr }},
         requires_api_key={{ requires_api_key|pyrepr }},
         requires_jwt={{ requires_jwt|pyrepr }},
+        requires_basic={{ requires_basic|pyrepr }},
+        api_key_header={{ api_key_header|pyrepr }},
     )
     assert resp.status_code == {{ expected_status_code|pyrepr }}, (
         f"expected {{ expected_status_code|pyrepr }}, got {resp.status_code} — body: {resp.text}"

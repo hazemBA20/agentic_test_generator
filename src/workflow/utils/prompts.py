@@ -17,8 +17,9 @@ Coverage rules:
 - Only generate a scenario for a status code if you can name a concrete request-level condition (a field value, a missing field, a param) that would produce it. Skip status codes that depend on caller identity or authorization (e.g. a generic "forbidden") when the operation gives you no field or param whose value determines that outcome — those aren't reachable by varying the request body alone.
 - Do not target a fixed count. Stop once every required field, enum, and documented conditional is covered. Don't add near-duplicate scenarios — if two scenarios would use the same or an equivalent input value to reach the same status code, keep only one.
 - Only use status codes present in this operation's response map. Never invent one.
-- The test runner always sends its configured X-API-KEY. Do not create scenarios
-  for missing, invalid, or alternative authentication credentials.
+- The test runner attaches its configured credentials automatically (API key or
+  bearer token, per the operation's security). Do not create scenarios for
+  missing, invalid, or alternative authentication credentials.
 
 Keep every description to one sentence. No payload values, no JSON, no field values beyond what's needed to name the focus."""
 
@@ -41,7 +42,7 @@ For each test case, produce:
 - request_body: a concrete JSON request payload that matches the operation's request schema and realizes the scenario's focus (e.g. omit the field under test for a "missing field" scenario, use an invalid enum value for an "invalid enum" scenario). Use the schema's example values for every field not under test. Use null if the operation has no request body.
   - path_params: values for `{name}` placeholders in the operation path. Supply every path parameter needed to reach this operation. Use `{}` only when the path has no placeholders.
   - query_params: values for query parameters. Supply every required query parameter except when this scenario specifically tests it as missing or invalid. Use `{}` when none apply.
-  - headers: values for operation-specific header parameters. Supply every required header except when this scenario specifically tests it as missing or invalid. Never include X-API-KEY: the runner adds it automatically. Use `{}` when none apply.
+  - headers: values for operation-specific header parameters. Supply every required header except when this scenario specifically tests it as missing or invalid. Never include credential headers (Authorization, X-API-KEY or similar): the runner attaches credentials automatically per the operation's security. Use `{}` when none apply.
   - The operation payload contains `available_fixture_keys`. For a domain-specific value that must already exist in the target environment, use `<FIXTURE:key>` only when `key` appears in that list. Never invent a fixture key.
   - If an externally valid value is required but no matching fixture key exists, put the suggested snake_case key in `missing_fixtures` and still create the closest schema-valid request. Otherwise return an empty `missing_fixtures` list. Generation will report blocked plans before execution.
   - Prefer values in this order: an available domain fixture when external state is required, then schema const, example, default, first enum value, then a value satisfying type/format/min/max constraints. Examples for identifiers or credentials are illustrative unless explicitly documented as executable.
@@ -82,7 +83,7 @@ For every gap you report, supply a scenario unless the gap genuinely cannot be r
 Rules:
 - Set scenario to null when no request-level condition produces the outcome. Prefer null over inventing one.
 - Only use status codes present in this operation's response map. Never invent one.
-- The runner always sends its configured X-API-KEY. Never report missing, invalid, or alternative authentication as a gap.
+- The runner attaches its configured credentials automatically. Never report missing, invalid, or alternative authentication as a gap.
 - Do not report a gap that an existing test already covers, even if that test is named unhelpfully — judge by what the request actually sends.
 - Do not invent stricter validation than the operation documents.
 - Report nothing if the suite is complete. An empty gap list is the correct answer for a well-covered operation."""

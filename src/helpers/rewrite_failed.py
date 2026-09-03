@@ -61,8 +61,9 @@ Rules:
 - kind=status means the HTTP status was wrong. Patch exactly one of request_body,
   path_params, query_params, or headers so the request realizes the same scenario
   (missing field, invalid enum, etc.). Leave all other patch fields and
-  expected_response null. Never include X-API-KEY in headers. Do not change
-  expected_status_code.
+  expected_response null. Never include credential headers (X-API-KEY,
+  Authorization) in headers: the runner attaches credentials itself. Do not
+  change expected_status_code.
 - Do not invent new scenarios.
 - Keep file-upload values as "<FILE:sample.pdf>" / "<FILE:sample.jpg>" when a
   binary field is required.
@@ -182,8 +183,10 @@ def _apply(plan: dict, patch: NamedPatch, kind: str) -> str | None:
         if len(supplied) != 1:
             return "status patch must supply exactly one request input field"
         field, value = supplied[0]
-        if field == "headers" and any(str(key).lower() == "x-api-key" for key in value):
-            return "status patch attempted to replace X-API-KEY"
+        if field == "headers" and any(
+            str(key).lower() in {"x-api-key", "authorization"} for key in value
+        ):
+            return "status patch attempted to replace a credential header (X-API-KEY/Authorization)"
         sentinel = _sentinel_in_value(value)
         if sentinel:
             return (

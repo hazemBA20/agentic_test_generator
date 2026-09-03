@@ -45,6 +45,8 @@ def execute_plan(plan: dict, issues: list[str] | None = None) -> dict:
             headers=plan.get("headers") or {},
             requires_api_key=plan.get("requires_api_key", False),
             requires_jwt=plan.get("requires_jwt", False),
+            requires_basic=plan.get("requires_basic", False),
+            api_key_header=plan.get("api_key_header", "X-API-KEY"),
         )
     except Exception as e:
         return {

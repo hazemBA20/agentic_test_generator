@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from helpers.auth_resolver import resolve_operation_auth
 from helpers.coverage import (
     audit_operation, plans_for_operation, required_body_fields, UNREACHABLE_STATUSES,
 )
@@ -214,6 +215,16 @@ def _hollow_reason(plan: TestPlan, required: list[str]) -> str | None:
 
 
 async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestPlan]:
+    auth = resolve_operation_auth(operation)
+    if auth["kind"] == "unsupported":
+        # Building plans we cannot authenticate only produces 401s the rewriter
+        # is forbidden to touch. Say why and skip before paying for tokens.
+        print(
+            f"Dropping {len(batch)} scenario(s) for {operation.get('method', '')} "
+            f"{operation.get('path', '')}: {auth['reason']}"
+        )
+        return []
+
     async def _invoke():
         op_payload = json.dumps(_builder_operation(operation), ensure_ascii=False, default=str)
         scenarios_payload = json.dumps([s.model_dump() for s in batch], ensure_ascii=False)
@@ -234,11 +245,14 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
 
     # method/path are deterministic from the operation itself, so don't trust
     # the model to copy them correctly — backfill regardless of what it said.
+    # Same for auth: resolved from the operation's security, not the model.
     for plan in plans:
         plan.path = operation.get("path", plan.path)
         plan.method = operation.get("method", plan.method)
-        plan.requires_api_key = True
-        plan.requires_jwt = False
+        plan.requires_api_key = auth["kind"] == "api_key"
+        plan.requires_jwt = auth["kind"] == "bearer"
+        plan.requires_basic = auth["kind"] == "basic"
+        plan.api_key_header = auth.get("header") or "X-API-KEY"
         plan.content_type = _content_type(operation)
 
     required = required_body_fields(operation)

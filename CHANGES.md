@@ -133,3 +133,50 @@ executed against `https://test.patch.digiclaim.tn/api`:
    still accepted but ignored), schema-based response validation via
    `jsonschema`, an LLM response cache for cheaper prompt iteration, and a
    combined HTML/markdown run report.
+
+---
+
+## Branch: `auth-fix` — auth is now read from the spec, not hardcoded
+
+The single biggest gap from the list above is closed on this branch
+(`auth-fix`, branched from `fix-known-issues`).
+
+### What was wrong
+
+`nodes._build_batch` stamped `requires_api_key = True, requires_jwt = False`
+onto every plan regardless of the spec, and the `security_schemes` the parser
+extracted were never read. Public endpoints were sent a credential they did
+not need, and bearer/basic-protected operations could not be tested at all
+(`requires_jwt` was accepted and silently ignored).
+
+### What changed
+
+- **`src/helpers/auth_resolver.py` (new)** resolves each operation's effective
+  `security` against the spec's `securitySchemes`: explicit `[]` is public,
+  `apiKey` uses the scheme's declared header, `http: bearer` and
+  OAuth/OpenID resolve to a bearer token, `http: basic` to basic auth. An
+  operation whose scheme cannot be satisfied has its scenarios dropped at
+  build time with a printed reason — never turned into guaranteed-401 tests.
+  A spec silent about security keeps the original behavior (attach the API
+  key), so the current spec works unchanged.
+- **`nodes._build_batch`** backfills `requires_api_key` / `requires_jwt` /
+  `requires_basic` / `api_key_header` from the resolver instead of
+  hardcoding — same pattern as method/path backfill.
+- **`src/helpers/auth.py` (new)** resolves credentials from the environment:
+  `DIGIEXPERT_API_KEY`; a static bearer token (`AUTH_TOKEN`, or legacy
+  `API_JWT`/`DIGIEXPERT_JWT`); or a one-login-per-process flow
+  (`AUTH_TOKEN_URL` + `AUTH_USERNAME`/`AUTH_PASSWORD`, token read from
+  `access_token`/`token`/`jwt`); plus `AUTH_BASIC_USERNAME`/`AUTH_BASIC_PASSWORD`.
+- **`_test_support.send_request`** attaches what the plan's auth requires:
+  the key under the scheme's header name, `Authorization: Bearer` for JWT
+  (no longer ignored), and HTTP basic via `requests` auth. Public plans need
+  no credentials at all.
+- **Guardrails move in lockstep**: prompts now say the runner attaches
+  credentials per the operation's security (never include `Authorization` or
+  key headers in a plan), and the rewriter refuses patches that smuggle
+  credential headers.
+- `401/403` remain untestable infrastructure statuses — auth is satisfied,
+  never tested.
+
+The only deliberate behavior change: `requires_jwt=True` now works. The test
+that documented the old ignore-policy was rewritten to assert the new one.
