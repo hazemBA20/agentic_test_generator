@@ -7,6 +7,7 @@ import pytest
 from src.helpers import _test_support
 from src.helpers.generate_test_file import generate
 from src.helpers.plan_validation import validate_plans
+from src.helpers.rewrite_failed import _apply, NamedPatch
 from src.workflow.utils.models import ScenarioSpec, State, TestPlan as PlanModel
 
 execute_module = importlib.import_module("src.helpers.execute_plans")
@@ -303,6 +304,47 @@ def test_extension_only_file_sentinel_selects_matching_fixture():
 
     assert filename == "sample.pdf"
     assert path.name == "sample.pdf"
+
+
+def test_a_status_patch_with_a_response_sentinel_in_a_request_field_is_refused():
+    """A live run saw <GENERATED> patched into request_body — the runner would
+    have sent that literal string to the server."""
+    plan = _plan()
+
+    reason = _apply(
+        plan,
+        NamedPatch(
+            name="test_get_customer",
+            action="patch",
+            reason="swap the plate",
+            request_body={"registrationNumber": "<GENERATED>"},
+        ),
+        kind="status",
+    )
+
+    assert reason and "sentinel" in reason
+    assert plan["request_body"] is None  # untouched
+
+    # Nested occurrences are caught too, and legit request sentinels stay fine.
+    plan2 = _plan()
+    reason2 = _apply(
+        plan2,
+        NamedPatch(name="t", action="patch", reason="r",
+                   request_body={"items": [{"plate": "<ANY_STRING>"}]}),
+        kind="status",
+    )
+    assert reason2 and "sentinel" in reason2
+    assert plan2["request_body"] is None
+
+    plan3 = _plan()
+    reason3 = _apply(
+        plan3,
+        NamedPatch(name="t", action="patch", reason="r",
+                   request_body={"note": "<FIXTURE:expert_code>", "doc": "<FILE:pdf>"}),
+        kind="status",
+    )
+    assert reason3 is None
+    assert plan3["request_body"] == {"note": "<FIXTURE:expert_code>", "doc": "<FILE:pdf>"}
 
 
 def test_public_request_does_not_require_credentials(monkeypatch):
