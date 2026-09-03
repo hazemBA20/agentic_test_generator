@@ -3,6 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from helpers.parser import ingest_openapi_spec, pretty_print_operations
 from workflow.graph import PartialBuildError, compile_workflow
 
 
@@ -11,6 +12,10 @@ HELPERS = ROOT / "src" / "helpers"
 
 
 def main(args) -> int:
+    if args.list:
+        pretty_print_operations(ingest_openapi_spec(args.spec))
+        return 0
+
     workflow = compile_workflow()
     try:
         state = workflow.invoke(
@@ -73,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument("--spec", default=str(ROOT / "spec.json"), help="Path to OpenAPI spec")
     parser.add_argument("--index", type=int, default=0, help="Operation index (ignored with --all)")
     parser.add_argument("--all", action="store_true", help="Generate tests for every operation")
+    parser.add_argument("--list", action="store_true", help="Print the operation index and exit")
     parser.add_argument("--out", default=str(HELPERS / "test_plans.json"), help="Plan JSON output path")
     parser.add_argument("--tests", default=str(HELPERS / "test.py"), help="Generated pytest output path")
     parser.add_argument("--results", default=str(HELPERS / "test_results.json"), help="Execution result JSON path")

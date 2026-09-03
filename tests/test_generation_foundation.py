@@ -310,10 +310,19 @@ def test_public_request_does_not_require_credentials(monkeypatch):
 
     monkeypatch.setattr(_test_support.requests, "request", fake_request)
     monkeypatch.delenv("DIGIEXPERT_API_KEY", raising=False)
+    monkeypatch.setenv("API_BASE_URL", "https://example.test/api")
 
     _test_support.send_request("GET", "/health", None, "application/json")
 
     assert captured["headers"] == {}
+
+
+def test_request_without_a_base_url_is_refused(monkeypatch):
+    """No silent fallback: an unset target must stop the suite, not pick one."""
+    monkeypatch.delenv("API_BASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="API_BASE_URL"):
+        _test_support.send_request("GET", "/health", None, "application/json")
 
 
 def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
@@ -324,6 +333,7 @@ def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
         return object()
 
     monkeypatch.setattr(_test_support.requests, "request", fake_request)
+    monkeypatch.setenv("API_BASE_URL", "https://example.test/api")
     monkeypatch.setenv("DIGIEXPERT_API_KEY", "company-api-key")
     monkeypatch.setenv("API_JWT", "legacy-jwt")
     monkeypatch.setenv("DIGIEXPERT_JWT", "legacy-jwt")
@@ -343,6 +353,7 @@ def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
 
 def test_protected_request_reports_missing_credential(monkeypatch):
     monkeypatch.delenv("DIGIEXPERT_API_KEY", raising=False)
+    monkeypatch.setenv("API_BASE_URL", "https://example.test/api")
 
     with pytest.raises(RuntimeError, match="API-key-protected"):
         _test_support.send_request(
