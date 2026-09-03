@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import random
 import re
 import time
@@ -9,8 +8,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 
 from helpers.coverage import (
     audit_operation, plans_for_operation, required_body_fields, UNREACHABLE_STATUSES,
@@ -26,49 +23,18 @@ from workflow.utils.prompts import (
     COVERAGE_AUDITOR_SYSTEM_PROMPT,
     COVERAGE_AUDITOR_USER_PROMPT,
 )
+from workflow.utils.provider import gemini_model, groq_model
 
 load_dotenv()
 
 FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
 
-
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# Overridable so a quota-exhausted model can be swapped without a code edit,
-# the same way rewrite_failed.py takes REWRITE_MODEL.
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.5-flash")
-llm = ChatGoogleGenerativeAI(
-    model=GOOGLE_MODEL,
-     google_api_key=GEMINI_API_KEY,
-    temperature=0.2,
-    max_output_tokens=7900,
-)
-
-
-# Groq — fast OpenAI-compatible inference for open models. The .env key is the
-# lowercase `groq_key`; fall back to the conventional GROQ_API_KEY too. Model is
-# overridable like GOOGLE_MODEL; the default is the strongest general model this
-# key currently serves (run `Groq().models.list()` to see the live lineup — it
-# rotates, and there is no Llama 3.x on it right now).
-GROQ_API_KEY = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-groq_llm = ChatGroq(
-    model=GROQ_MODEL,
-    api_key=GROQ_API_KEY,
-    temperature=0,
-    max_tokens=8000,
-)
-
-
-
-
-
-scenario_planner = llm.with_structured_output(Scenarios)
-test_builder =  groq_llm.with_structured_output(TestPlans)
+scenario_planner = gemini_model().with_structured_output(Scenarios)
+test_builder = groq_model().with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
-coverage_auditor = llm.with_structured_output(CoverageGaps)
+coverage_auditor = gemini_model().with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and
