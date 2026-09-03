@@ -72,7 +72,7 @@ def _make_env() -> Environment:
 
 
 def _render(env: Environment, plan: dict, name: str, issues: list[str]) -> str:
-    template = env.get_template("test_functinon.j2")
+    template = env.get_template("test_function.j2")
     description = str(plan.get("description") or "").replace('"""', "'''").replace("\n", " ")
     return template.render(
         name=name,
