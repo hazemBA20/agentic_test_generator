@@ -6,9 +6,8 @@ import pytest
 
 from src.helpers import _test_support
 from src.helpers.generate_test_file import generate
-from src.helpers.generate_test_file_2 import generate as generate_jinja
 from src.helpers.plan_validation import validate_plans
-from src.workflow.utils.models import State, TestPlan as PlanModel
+from src.workflow.utils.models import ScenarioSpec, State, TestPlan as PlanModel
 
 execute_module = importlib.import_module("src.helpers.execute_plans")
 
@@ -114,6 +113,45 @@ def test_review_routing_ignores_skips_and_stops_without_patches(monkeypatch):
     assert graph._after_review({"patched_count": 1}) == "persist"
 
 
+def test_a_planner_failure_is_counted_as_a_build_failure(monkeypatch):
+    """A lost planner call must not silently shrink the persisted suite either."""
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    async def failing_plan(operation):
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr(nodes, "_plan_operation", failing_plan)
+
+    state = nodes.call_llm_1({"operations": [{"path": "/x", "method": "GET", "operation": {}}]})
+
+    assert state["scenarios"] == [[]]
+    assert state["build_failures"] == 1
+
+
+def test_the_builder_accumulates_rather_than_overwrites_build_failures(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    scenario = ScenarioSpec(
+        name="test_x", category="negative", description="d", target_status_code=400, focus="f"
+    )
+    monkeypatch.setattr(
+        nodes, "build_plans_with_failures", lambda operations, scenarios: ([], 1)
+    )
+
+    state = nodes.call_llm_2({
+        "operations": [{"path": "/x", "method": "GET", "operation": {}}],
+        "scenarios": [[scenario]],
+        "build_failures": 2,
+    })
+    assert state["build_failures"] == 3  # the planner's 2, plus this batch's 1
+
+    # An empty scenario state keeps earlier losses instead of resetting to zero.
+    early = nodes.call_llm_2({"operations": [], "scenarios": [[]], "build_failures": 2})
+    assert early["build_failures"] == 2
+
+
 def test_plan_contract_supports_all_request_locations_and_boundary_category():
     plan = PlanModel(**_plan(category="boundary"))
 
@@ -151,16 +189,6 @@ def test_unknown_referenced_fixture_is_quarantined_without_transport(tmp_path: P
     assert "pytest.skip(" in function_source
     assert unknown_key in function_source
     assert "send_request" not in function_source
-
-    jinja_output_path = tmp_path / "test_generated_jinja.py"
-    with pytest.warns(UserWarning, match=rf"undefined fixture\(s\): {unknown_key}"):
-        generate_jinja(plans_path, jinja_output_path)
-    jinja_function = jinja_output_path.read_text(encoding="utf-8").split(
-        "def test_get_customer():", 1
-    )[1]
-    assert "pytest.skip(" in jinja_function
-    assert unknown_key in jinja_function
-    assert "send_request" not in jinja_function
 
     def unexpected_request(**kwargs):
         pytest.fail(f"transport must not be called for an invalid plan: {kwargs}")

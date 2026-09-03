@@ -189,27 +189,54 @@ def _chunked(items: list, size: int):
         yield items[i:i + size]
 
 
+async def _plan_operation(operation: dict) -> list[ScenarioSpec]:
+    """Plan one operation under the same throttle as the builder."""
+    async def _invoke():
+        op_payload = json.dumps(operation, ensure_ascii=False, default=str)
+        user_content = SCENARIO_PLANNER_USER_PROMPT.format(operation=op_payload)
+        return await scenario_planner.ainvoke(
+            [SystemMessage(content=SCENARIO_PLANNER_SYSTEM_PROMPT), HumanMessage(content=user_content)]
+        )
+
+    async with _semaphore:
+        msg = await _call_with_retry(_invoke)
+    return msg.scenarios
+
+
+async def _plan_all(operations: list[dict]) -> tuple[list[list[ScenarioSpec]], int]:
+    results = await asyncio.gather(
+        *(_plan_operation(operation) for operation in operations),
+        return_exceptions=True,
+    )
+    scenarios_per_operation: list[list[ScenarioSpec]] = []
+    failed = 0
+    for operation, result in zip(operations, results):
+        if isinstance(result, Exception):
+            failed += 1
+            print(
+                f"Planning failed for {operation.get('method', '')} {operation.get('path', '')} "
+                f"after retries: {result}"
+            )
+            scenarios_per_operation.append([])
+            continue
+        scenarios_per_operation.append(result)
+    return scenarios_per_operation, failed
+
+
+def plan_scenarios(operations: list[dict]) -> tuple[list[list[ScenarioSpec]], int]:
+    """Turn operations into per-operation scenarios, and count planning losses."""
+    return _run(_plan_all(operations))
+
+
 def call_llm_1(state: State) -> dict:
     """Planner node: turn each OpenAPI operation into a list of test scenarios."""
     print("Invoking scenario planner LLM...")
-    operations = state["operations"]
-    scenarios_per_operation = []
-
-    for operation in operations:
-        op_payload = json.dumps(operation, ensure_ascii=False, default=str)
-        user_content = SCENARIO_PLANNER_USER_PROMPT.format(operation=op_payload)
-        try:
-            msg = scenario_planner.invoke(
-                [SystemMessage(content=SCENARIO_PLANNER_SYSTEM_PROMPT), HumanMessage(content=user_content)]
-            )
-            
-            scenarios_per_operation.append(msg.scenarios)
-            print("gotten the scenarios")
-        except Exception as e:
-            print(f"Error invoking LLM for operation {operation.get('path', '')}: {e}")
-            scenarios_per_operation.append([])
-
-    return {"scenarios": scenarios_per_operation}
+    scenarios_per_operation, failed = plan_scenarios(state["operations"])
+    if failed:
+        print(
+            f"WARNING: {failed} operation(s) produced no scenarios — this suite is incomplete."
+        )
+    return {"scenarios": scenarios_per_operation, "build_failures": failed}
 
 
 def _hollow_reason(plan: TestPlan, required: list[str]) -> str | None:
@@ -320,7 +347,7 @@ def call_llm_2(state: State) -> dict:
     scenarios_per_operation = state.get("scenarios") or []
     if not any(scenarios_per_operation):
         print("No scenarios found in state; skipping test builder.")
-        return {"plans": [], "build_failures": 0}
+        return {"plans": [], "build_failures": state.get("build_failures") or 0}
     print("Invoking test builder LLM...")
 
     planned = sum(len(scenarios) for scenarios in scenarios_per_operation)
@@ -333,7 +360,12 @@ def call_llm_2(state: State) -> dict:
             f"plan(s) from {planned} planned scenario(s) — this suite is incomplete."
         )
 
-    return {"plans": all_plans, "build_failures": failed_batches}
+    # Accumulate rather than overwrite: planner losses already in state must
+    # survive the builder's own count, or persist_plans loses its guarantee.
+    return {
+        "plans": all_plans,
+        "build_failures": (state.get("build_failures") or 0) + failed_batches,
+    }
 
 
 # --- coverage agent -------------------------------------------------------

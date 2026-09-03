@@ -136,8 +136,10 @@ def review_failures(state: State) -> dict:
     skipped = sum(entry.get("action") == "skip" for entry in review_log)
     # A skip because the model call failed is not the reviewer deciding a failure
     # is unfixable — it never saw the failure at all. Reporting both as "skip"
-    # makes an unreachable model look like a clean bill of health.
-    errored = sum(entry.get("source") == "error" for entry in review_log)
+    # makes an unreachable model look like a clean bill of health. Counted over
+    # the cumulative log so errors from earlier passes are not re-reported as
+    # resolved by a later clean pass.
+    errored = sum(entry.get("source") == "error" for entry in all_entries)
     summary = f"Reviewer pass {review_pass}: {patched_count} patch(es), {skipped} skip(s)"
     if errored:
         summary += f", of which {errored} are model errors rather than judgments"
