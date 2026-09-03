@@ -9,7 +9,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openrouter import ChatOpenRouter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 
@@ -31,15 +30,8 @@ from workflow.utils.prompts import (
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-MODEL_NAME = "deepseek/deepseek-v4-flash"
-FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
-model = ChatOpenRouter(
-    model=MODEL_NAME,
-    temperature=0,
-    max_tokens=8000,
-    reasoning =  {"effort": "low"},
-)
+FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
 
 
@@ -594,14 +586,3 @@ def fill_gaps(state: State) -> dict:
         # so persist_plans must know about fill losses before it overwrites.
         "build_failures": (state.get("build_failures") or 0) + failed_batches,
     }
-
-
-# def create_test_file(state:State):
-#     """Write a Python test file with one function per TestPlan."""
-
-#     out_path = state.get("out_path")
-#     from helpers.generate_test_file import generate
-#     plans=state.get("plans", "")
-#     plans_path = Path(out_path).with_suffix(".json")
-#     plans_path.write_text(json.dumps([p.model_dump() for p in plans], indent=2, default=str), encoding="utf-8")
-#     generate(plans_path, Path(out_path))
