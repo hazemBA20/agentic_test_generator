@@ -46,20 +46,24 @@ pip install -r requirements.txt
 
 ### 2. Configure model access
 
-Create a `.env` file in the repository root:
+Create a `.env` file in the repository root (see [`.env.example`](.env.example)
+for every variable):
 
 ```env
-OPENROUTER_API_KEY=...
 GEMINI_API_KEY=...
+groq_key=...
 ```
 
-Planner and builder models are configured in
-[`src/workflow/utils/nodes.py`](src/workflow/utils/nodes.py).
+Planner and coverage run on Gemini, the builder on Groq, and the failure
+reviewer on OpenRouter. Providers, models, and their `GOOGLE_MODEL` /
+`GROQ_MODEL` / `REWRITE_MODEL` overrides live in
+[`src/workflow/utils/provider.py`](src/workflow/utils/provider.py).
 
 ### 3. Add an API source
 
 Place your source at `spec.json` (or provide another path with `--spec`).
 OpenAPI JSON/YAML, Swagger, and Postman Collection v2 documents are supported.
+List the operations and their indices with `python main.py --list`.
 
 ### 4. Generate tests
 
