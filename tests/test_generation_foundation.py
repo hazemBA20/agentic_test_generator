@@ -185,6 +185,9 @@ def test_unknown_referenced_fixture_is_quarantined_without_transport(tmp_path: P
         generate(plans_path, output_path)
 
     generated = output_path.read_text(encoding="utf-8")
+    # The rendered file must be importable Python — a template whitespace bug
+    # once emitted body lines at column 0, which only surfaced at runtime.
+    compile(generated, str(output_path), "exec")
     function_source = generated.split("def test_get_customer():", 1)[1]
     assert "pytest.skip(" in function_source
     assert unknown_key in function_source
@@ -265,6 +268,7 @@ def test_generator_keeps_advisory_plan_and_empty_response_assertion(tmp_path: Pa
         generate(plans_path, output_path)
 
     generated = output_path.read_text(encoding="utf-8")
+    compile(generated, str(output_path), "exec")
     assert "def test_get_customer():" in generated
     assert "'expertId': 'fallback-expert'" in generated
     assert "assert_response(resp.json(), {}" in generated
