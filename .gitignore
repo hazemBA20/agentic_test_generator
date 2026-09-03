@@ -1,6 +1,7 @@
 # Notes, evaluations and guides are working documents — only the README ships.
 *.md
 !README.md
+!CHANGES.md
 
 # Generated artifacts: the plans, the rendered suite, and every run report.
 src/helpers/test.py
