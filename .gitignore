@@ -13,8 +13,6 @@ src/helpers/coverage_report.json
 spec.json
 config.yaml
 .env
-pyproject.toml
-pyrightconfig.json
 
 # Stray suites at the repo root (scratch runs of the generated tests).
 pytest.py

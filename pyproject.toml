@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # Basic pycodestyle errors
+    "F",   # Real issues: unused imports, undefined names, etc.
+]
+
+ignore = [
+    "E501", # Line too long
+]
