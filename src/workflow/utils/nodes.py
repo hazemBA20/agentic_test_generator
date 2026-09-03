@@ -62,7 +62,7 @@ llm = ChatGoogleGenerativeAI(
 # key currently serves (run `Groq().models.list()` to see the live lineup — it
 # rotates, and there is no Llama 3.x on it right now).
 GROQ_API_KEY = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 groq_llm = ChatGroq(
     model=GROQ_MODEL,
     api_key=GROQ_API_KEY,
@@ -74,11 +74,11 @@ groq_llm = ChatGroq(
 
 
 
-scenario_planner = groq_llm.with_structured_output(Scenarios)
+scenario_planner = llm.with_structured_output(Scenarios)
 test_builder =  groq_llm.with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
-coverage_auditor = groq_llm.with_structured_output(CoverageGaps)
+coverage_auditor = llm.with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and

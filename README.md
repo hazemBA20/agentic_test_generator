@@ -1,191 +1,190 @@
-# agentic_test_generator
+# Agentic Test Generator
 
-Generate executable API tests from an OpenAPI spec using a small
-LLM-driven workflow built on [LangGraph](https://www.langchain.com/langgraph).
+Generate executable API tests from an OpenAPI/Swagger document or a Postman
+collection using an LLM-powered [LangGraph](https://www.langchain.com/langgraph)
+workflow.
 
-The pipeline takes an OpenAPI 3 document, plans the distinct test scenarios
-each operation needs (happy path, negative, boundary), turns those scenarios
-into concrete request/response test cases, and renders them into a single
-plain-pytest file — no parametrized wrappers, just one real test function per
-scenario.
+The generator:
 
-## How it works
+- discovers happy-path, negative, and boundary scenarios;
+- builds concrete request and response assertions;
+- renders one readable `pytest` function per scenario;
+- optionally audits coverage, executes tests against a live API, and performs
+  one constrained rewrite pass for failures.
 
-The workflow is a LangGraph pipeline. Live execution and the one-pass reviewer
-are opt-in so a normal generation run never calls the target API:
+Normal generation is offline: the target API is contacted only with
+`--run-tests`, `--review`, or when running the generated suite.
 
-```
-OpenAPI spec
-    │  parser.py ingests + resolves $refs
-    ▼
-┌────────────┐   scenarios per operation   ┌────────────┐
-│  planner   │ ───────────────────────────▶ │  builder   │
-│ (Gemini)   │   (category / status /      │  (DeepSeek) │
-│ call_llm_1 │    focus)                    │  call_llm_2 │
-└────────────┘                              └────────────┘
-                                                   │ TestPlan list
-                                                   ▼
-                                    persist plans → render pytest
-                                                       │
-                           --run-tests                ▼
-                              └──────────▶ execute plans → results JSON
-                                                   │
-                           --review (one pass)     ▼
-                              └──────────▶ rewrite plans → render → execute
+## Workflow
+
+```text
+API specification
+      │
+      ▼
+ ingest and resolve $refs
+      │
+      ▼
+ plan scenarios ──► build test plans ──► render pytest
+                                           │
+                         ┌─────────────────┼─────────────────┐
+                         ▼                 ▼                 ▼
+                    coverage audit     run tests        review failures
 ```
 
-1. **Ingest** — `src/helpers/parser.py` loads the spec, resolves every `$ref`
-   (including nested ones), and extracts each HTTP operation into a
-   self-contained payload with its resolved definitions.
-2. **Plan** — `call_llm_1` asks the planner model to list the distinct
-   scenarios an operation needs, following explicit coverage rules: one happy
-   path per valid request shape, one negative per required field and per enum,
-   one per documented conditional branch, boundary cases for named edge cases.
-   It only targets status codes actually documented on the operation.
-3. **Build** — `call_llm_2` turns each scenario into a concrete `TestPlan`
-   (request body, expected status code, response-body assertions). The builder
-   runs in batches with bounded concurrency, a shared token-bucket rate
-   limiter, and exponential-backoff retries (`src/workflow/utils/nodes.py`).
-   Request `method`/`path`/`content_type` are backfilled from the
-   operation deterministically rather than trusted from the model.
-4. **Render** — `src/helpers/generate_test_file.py` reads the plans JSON and
-   writes `test.py`, one pytest function per plan, with safe unique identifiers
-   and literal payloads. Generated output — don't hand-edit it; regenerate.
-5. **Execute and review (optional)** — `execute_plans.py` records live results.
-   `rewrite_failed.py` can make one constrained LLM patch pass, then the graph
-   regenerates and executes the affected suite once more.
+The planner focuses on documented behavior: valid request shapes, required
+fields and parameters, enums, conditionals, boundaries, and documented status
+codes. The builder uses schema examples and configured fixtures to make each
+scenario executable.
 
-## Project structure
+## Quick start
 
-```
-├── spec.json                  # OpenAPI spec to generate from (gitignored)
-├── src/
-│   ├── main.py                # CLI entry point for the complete workflow
-│   ├── workflow/
-│   │   ├── graph.py           # LangGraph wiring
-│   │   └── utils/
-│   │       ├── models.py      # Pydantic models: State, ScenarioSpec, TestPlan
-│   │       ├── prompts.py     # planner + builder system prompts
-│   │       ├── nodes.py       # planner/builder nodes, batching, retries
-│   │       └── provider.py    # LLM client setup
-│   └── helpers/
-│       ├── parser.py          # OpenAPI ingestion + $ref resolution
-│       ├── generate_test_file.py  # plans JSON → test.py renderer
-│       ├── execute_plans.py   # plans → live execution results
-│       ├── rewrite_failed.py  # one constrained LLM rewrite pass
-│       ├── _test_support.py   # runtime support for generated tests
-│       ├── conftest.py        # fail-fast env validation for pytest
-│       ├── test_plans.json    # generated plans (gitignored)
-│       ├── test.py            # generated pytest file (gitignored)
-│       └── fixture/           # sample.pdf / sample.jpg for file uploads
-```
-
-## Setup
+### 1. Install
 
 ```bash
-pip install langgraph langchain-core langchain-openrouter \
-            langchain-google-genai pydantic python-dotenv jsonref \
-            requests pytest
+pip install -r requirements.txt
 ```
 
-Create a `.env` (see `.gitignore`) with the LLM keys:
+### 2. Configure model access
 
-```
+Create a `.env` file in the repository root:
+
+```env
 OPENROUTER_API_KEY=...
 GEMINI_API_KEY=...
 ```
 
-The planner and builder can use different models — both are configured at the
-top of `src/workflow/utils/nodes.py`.
+Planner and builder models are configured in
+[`src/workflow/utils/nodes.py`](src/workflow/utils/nodes.py).
 
-## Usage
+### 3. Add an API source
 
-Generate and render tests for the first operation of `spec.json`:
+Place your source at `spec.json` (or provide another path with `--spec`).
+OpenAPI JSON/YAML, Swagger, and Postman Collection v2 documents are supported.
+
+### 4. Generate tests
 
 ```bash
 cd src
-python main.py
-```
-
-Generate and render tests for every operation:
-
-```bash
 python main.py --all
 ```
 
-Pick a specific operation:
+This writes:
 
-```bash
-python main.py --index 2
+- `src/helpers/test_plans.json` — generated test plans;
+- `src/helpers/test.py` — executable pytest tests.
+
+Generate only one operation with `python main.py --index 2`.
+
+## Run against an API
+
+Set the target URL and API key:
+
+```env
+API_BASE_URL=https://api.example.com
+DIGIEXPERT_API_KEY=...
 ```
 
-Run the generated plans against the configured API:
-
-```bash
-python main.py --all --run-tests
-```
-
-Run one constrained reviewer pass after failures, then regenerate and execute
-the suite once more:
-
-```bash
-python main.py --all --review
-```
-
-### Running the generated tests
-
-The generated tests hit a live API, so you need credentials and the target
-base URL. The default base URL and the env var names below are fixed in
-`src/helpers/_test_support.py` and `src/helpers/conftest.py`:
-
-```
-API_BASE_URL=<your server base url>
-DIGIEXPERT_API_KEY=<your API key>
-```
-
-Then:
+Then run the generated tests:
 
 ```bash
 pytest src/helpers/test.py
 ```
 
-Support details in `_test_support.py`:
+Or let the workflow execute plans directly:
 
-- **Auth** — every generated request attaches `X-API-KEY`, read from
-  `DIGIEXPERT_API_KEY`. JWT authentication is not part of this demo.
-- **File uploads** — a plan referencing `"<FILE:sample.ext>"` resolves to a
-  local file under `fixture/`. Exact filenames are optional: the runner first
-  looks for a matching extension, then uses any available sample while keeping
-  the requested upload filename.
-- **Parameters** — path placeholders are URL-encoded, query values are sent via
-  `requests` query handling, and documented non-auth header parameters are
-  included with every generated request.
-- **Data fixtures** — `fixture/test_data.json` provides valid domain values for
-  happy-path tests. Use an exact placeholder such as `<FIXTURE:expert_code>` in
-  a plan to resolve `expert_code`; use `<ENV:VARIABLE_NAME>` for values that
-  must stay outside the repository.
-- **Response assertions** — `assert_response` walks the expected dict; the
-  sentinel `<GENERATED>` asserts a key exists without pinning its value, so
-  server-generated ids/references don't cause brittle failures.
+```bash
+cd src
+python main.py --all --run-tests
+```
 
-## Configuration
+After failures, run one constrained review and verification pass:
 
-`config.yaml` currently holds the API base URL used by the generator itself
-(`http://localhost:8080`). Tuning knobs for the builder live in
-`src/workflow/utils/nodes.py`:
+```bash
+python main.py --all --review
+```
 
-| Constant              | Default | Purpose                                     |
-| --------------------- | ------- | ------------------------------------------- |
-| `BUILD_BATCH_SIZE`    | 4       | Scenarios per builder LLM call              |
-| `MAX_CONCURRENT_CALLS`| 3       | In-flight model requests                    |
-| `MAX_CALLS_PER_SECOND`| 2       | Sustained request rate across all calls     |
-| `MAX_RETRIES`         | 5       | Retries per batch on 429/timeout/5xx        |
+Coverage auditing and gap filling are available with:
 
-## Notes
+```bash
+python main.py --all --coverage
+```
 
-- This repo is an experimental test/agent harness under `tests/agentic`. It
-  is coupled to the API described by `spec.json` and sends `X-API-KEY` with
-  every request. The spec itself is confidential and gitignored.
-- Known limitations and planned work are tracked in
-  `NEXT_IMPROVEMENTS.md` (config management, logging, Jinja2 templating, unit
-  tests).
+## Fixtures
+
+Fixtures keep generated tests tied to real, valid data without hard-coding
+environment-specific values into prompts or test code.
+
+### Values
+
+Add reusable values to
+[`src/helpers/fixture/test_data.json`](src/helpers/fixture/test_data.json):
+
+```json
+{
+  "expert_code": "MY_EXPERT_CODE",
+  "mission_reference": "008/26"
+}
+```
+
+The builder may reference them as `<FIXTURE:expert_code>`. Values are resolved
+at test time inside request bodies, paths, query parameters, and headers.
+
+### Photos and documents
+
+Copy files into [`src/helpers/fixture/`](src/helpers/fixture/) and reference
+them as `<FILE:passport.pdf>` or `<FILE:identity_card.jpg>`. Multipart uploads
+are opened and closed automatically during each request. If the exact filename
+is unavailable, the runner looks for a file with the same extension.
+
+### Secrets and external values
+
+Use `<ENV:VARIABLE_NAME>` for secrets or values that should remain outside the
+repository, then define the environment variable before running tests.
+
+## Repository layout
+
+```text
+src/
+├── main.py                         CLI entry point
+├── workflow/
+│   ├── graph.py                    LangGraph workflow
+│   └── utils/
+│       ├── models.py               Pydantic state and plan models
+│       ├── nodes.py                Planner, builder, coverage, and retries
+│       ├── prompts.py              LLM instructions
+│       └── provider.py             Model clients
+└── helpers/
+    ├── parser.py                   OpenAPI/Postman ingestion
+    ├── generate_test_file.py       Plans → pytest
+    ├── execute_plans.py            Plans → live API results
+    ├── rewrite_failed.py           Constrained failure repair
+    ├── _test_support.py            Runtime resolution and assertions
+    └── fixture/                    Files and test_data.json
+tests/                              Unit and integration tests
+```
+
+Generated artifacts and the confidential API specification are gitignored.
+Generated `test.py` should be regenerated rather than edited by hand.
+
+## Tuning
+
+Builder performance can be adjusted in `src/workflow/utils/nodes.py`:
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `BUILD_BATCH_SIZE` | 4 | Scenarios per builder call |
+| `MAX_CONCURRENT_CALLS` | 3 | Simultaneous model requests |
+| `MAX_CALLS_PER_SECOND` | 2 | Sustained request rate |
+| `MAX_RETRIES` | 5 | Retries for rate limits, timeouts, and 503s |
+
+## Development
+
+Run the test suite from the repository root:
+
+```bash
+pytest
+```
+
+## License
+
+Add your project license here before publishing.

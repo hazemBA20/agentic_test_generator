@@ -25,3 +25,4 @@ test.py
 .hypothesis
 __pycache__/
 *.py[cod]
+avidea-mind-openapi.yaml
