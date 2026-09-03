@@ -1,4 +1,4 @@
-# Notes, evaluations and guides are working documents — only the README ships.
+# Notes, evaluations and guides are working documents — only the README and CHANGES.md ship.
 *.md
 !README.md
 !CHANGES.md
