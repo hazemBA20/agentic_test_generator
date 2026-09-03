@@ -3,6 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from helpers.logging_utils import log_event, new_run_id
 from workflow.graph import PartialBuildError, compile_workflow
 
 
@@ -11,10 +12,13 @@ HELPERS = ROOT / "src" / "helpers"
 
 
 def main(args) -> int:
+    run_id = new_run_id()
+    log_event("workflow_started", run_id=run_id, stage="workflow")
     workflow = compile_workflow()
     try:
         state = workflow.invoke(
             {
+                "run_id": run_id,
                 "spec_path": args.spec,
                 "operation_index": args.index,
                 "run_all": args.all,
@@ -32,10 +36,19 @@ def main(args) -> int:
             }
         )
     except PartialBuildError as e:
+        log_event("workflow_failed", run_id=run_id, stage="persist", error=str(e), level=40)
         print(f"ERROR: {e}")
         return 2
 
     exit_code = 0
+    log_event(
+        "workflow_completed",
+        run_id=run_id,
+        stage="workflow",
+        plans=len(state.get("plans") or []),
+        build_failures=state.get("build_failures", 0),
+        review_errors=state.get("review_errors", 0),
+    )
     print(f"Generated test suite: {state['tests_path']}")
     if state.get("build_failures"):
         print(

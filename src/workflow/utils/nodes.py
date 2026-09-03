@@ -19,6 +19,7 @@ from helpers.coverage import (
 from workflow.utils.models import (
     State, ScenarioSpec, Scenarios, TestPlan, TestPlans, CoverageGaps,
 )
+from helpers.logging_utils import log_event
 from workflow.utils.prompts import (
     SCENARIO_PLANNER_SYSTEM_PROMPT,
     SCENARIO_PLANNER_USER_PROMPT,
@@ -180,6 +181,12 @@ async def _call_with_retry(coro_fn):
             if attempt == MAX_RETRIES - 1 or not _is_retryable(e):
                 raise
             backoff = min(30, 2 ** attempt) + random.uniform(0, 1)
+            log_event(
+                "llm_retry",
+                stage="llm",
+                attempt=attempt + 1,
+                error=str(e),
+            )
             print(f"Retryable error ({e}); backing off {backoff:.1f}s (attempt {attempt + 1}/{MAX_RETRIES})")
             await asyncio.sleep(backoff)
 
@@ -192,6 +199,7 @@ def _chunked(items: list, size: int):
 def call_llm_1(state: State) -> dict:
     """Planner node: turn each OpenAPI operation into a list of test scenarios."""
     print("Invoking scenario planner LLM...")
+    log_event("planner_started", run_id=state.get("run_id"), stage="planner", operations=len(state["operations"]))
     operations = state["operations"]
     scenarios_per_operation = []
 
@@ -204,8 +212,23 @@ def call_llm_1(state: State) -> dict:
             )
             
             scenarios_per_operation.append(msg.scenarios)
+            log_event(
+                "planner_operation_completed",
+                run_id=state.get("run_id"),
+                stage="planner",
+                operation=operation.get("path"),
+                scenarios=len(msg.scenarios),
+            )
             print("gotten the scenarios")
         except Exception as e:
+            log_event(
+                "planner_operation_failed",
+                run_id=state.get("run_id"),
+                stage="planner",
+                operation=operation.get("path"),
+                error=str(e),
+                level=40,
+            )
             print(f"Error invoking LLM for operation {operation.get('path', '')}: {e}")
             scenarios_per_operation.append([])
 
@@ -332,7 +355,14 @@ def call_llm_2(state: State) -> dict:
             f"WARNING: {failed_batches} builder batch(es) failed. Built {len(all_plans)} "
             f"plan(s) from {planned} planned scenario(s) — this suite is incomplete."
         )
-
+    log_event(
+        "builder_completed",
+        run_id=state.get("run_id"),
+        stage="builder",
+        planned=planned,
+        built=len(all_plans),
+        failed_batches=failed_batches,
+    )
     return {"plans": all_plans, "build_failures": failed_batches}
 
 

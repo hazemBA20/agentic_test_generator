@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 
 from helpers.execute_plans import execute_plans
 from helpers.generate_test_file import generate
+from helpers.logging_utils import log_event
 from helpers.parser import ingest_openapi_spec
 from helpers.rewrite_failed import rewrite_plans
 from workflow.utils.models import State
@@ -45,6 +46,8 @@ def ingest(state: State) -> dict:
         if index < 0 or index >= len(operations):
             raise IndexError(f"Operation index {index} is outside 0..{len(operations) - 1}")
         operations = [operations[index]]
+    run_id = state.get("run_id")
+    log_event("operations_ingested", run_id=run_id, stage="ingest", count=len(operations))
     print(f"Ingested {len(operations)} operation(s) from {spec_path}")
     return {"operations": operations}
 
@@ -73,6 +76,13 @@ def persist_plans(state: State) -> dict:
         )
 
     plans_path.write_text(payload, encoding="utf-8")
+    log_event(
+        "plans_persisted",
+        run_id=state.get("run_id"),
+        stage="persist",
+        count=len(plans),
+        build_failures=state.get("build_failures", 0),
+    )
     print(f"Wrote {len(plans)} test plan(s) to {plans_path}")
     return {"plans_path": str(plans_path)}
 
@@ -97,6 +107,14 @@ def execute(state: State) -> dict:
     print(
         f"Execution complete: {passed} passed, {skipped} skipped, {failed} failed. "
         f"Results: {results_path}"
+    )
+    log_event(
+        "execution_completed",
+        run_id=state.get("run_id"),
+        stage="execute",
+        passed=passed,
+        skipped=skipped,
+        failed=failed,
     )
 
     # The first execution supplies evidence to the reviewer. Executions after a
@@ -142,6 +160,14 @@ def review_failures(state: State) -> dict:
     if errored:
         summary += f", of which {errored} are model errors rather than judgments"
     print(f"{summary}. Detailed log: {log_path}")
+    log_event(
+        "review_completed",
+        run_id=state.get("run_id"),
+        stage="review",
+        patched=patched_count,
+        skipped=skipped,
+        errors=errored,
+    )
     return {
         "plans": revised,
         "patched_count": patched_count,
@@ -164,6 +190,13 @@ def coverage(state: State) -> dict:
         json.dumps(result.get("coverage_report") or [], indent=2, default=str), encoding="utf-8"
     )
     print(f"Coverage report: {report_path}")
+    log_event(
+        "coverage_completed",
+        run_id=state.get("run_id"),
+        stage="coverage",
+        gaps=sum(len(entry.get("gaps") or []) for entry in result.get("coverage_report") or []),
+        filled=result.get("filled_count", 0),
+    )
     return {**result, "coverage_report_path": str(report_path)}
 
 
