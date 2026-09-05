@@ -13,7 +13,16 @@ from langchain_groq import ChatGroq
 from langchain_openrouter import ChatOpenRouter
 
 load_dotenv()
+from langchain_openai import ChatOpenAI
 
+# Initialize the model pointing to your external link
+def explabs_model():
+    """Judgment tasks: the scenario planner and the coverage auditor."""
+    return ChatOpenAI(
+        model="gpt-6-astra" ,
+        openai_api_key=os.getenv("EXPLABS_API_KEY"),
+        base_url="https://api.experientiallabs.ai/v1",
+    )
 
 def gemini_model():
     """Judgment tasks: the scenario planner and the coverage auditor."""
@@ -39,6 +48,14 @@ def openrouter_model():
     """The failure rewriter, kept on its own provider and quota."""
     return ChatOpenRouter(
         model=os.getenv("REWRITE_MODEL", "deepseek/deepseek-v4-flash"),
+        temperature=0,
+        max_tokens=8000,
+        reasoning={"effort": "low"},
+    )
+def sol_model():
+    """The failure rewriter, kept on its own provider and quota."""
+    return ChatOpenRouter(
+        model=os.getenv("SOL_MODEL", "solana/solana-v1.0"),
         temperature=0,
         max_tokens=8000,
         reasoning={"effort": "low"},
