@@ -6,9 +6,9 @@ import pytest
 
 from src.helpers import _test_support
 from src.helpers.generate_test_file import generate
-from src.helpers.generate_test_file_2 import generate as generate_jinja
 from src.helpers.plan_validation import validate_plans
-from src.workflow.utils.models import State, TestPlan as PlanModel
+from src.helpers.rewrite_failed import _apply, NamedPatch
+from src.workflow.utils.models import ScenarioSpec, State, TestPlan as PlanModel
 
 execute_module = importlib.import_module("src.helpers.execute_plans")
 
@@ -114,6 +114,45 @@ def test_review_routing_ignores_skips_and_stops_without_patches(monkeypatch):
     assert graph._after_review({"patched_count": 1}) == "persist"
 
 
+def test_a_planner_failure_is_counted_as_a_build_failure(monkeypatch):
+    """A lost planner call must not silently shrink the persisted suite either."""
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    async def failing_plan(operation):
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr(nodes, "_plan_operation", failing_plan)
+
+    state = nodes.call_llm_1({"operations": [{"path": "/x", "method": "GET", "operation": {}}]})
+
+    assert state["scenarios"] == [[]]
+    assert state["build_failures"] == 1
+
+
+def test_the_builder_accumulates_rather_than_overwrites_build_failures(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    scenario = ScenarioSpec(
+        name="test_x", category="negative", description="d", target_status_code=400, focus="f"
+    )
+    monkeypatch.setattr(
+        nodes, "build_plans_with_failures", lambda operations, scenarios: ([], 1)
+    )
+
+    state = nodes.call_llm_2({
+        "operations": [{"path": "/x", "method": "GET", "operation": {}}],
+        "scenarios": [[scenario]],
+        "build_failures": 2,
+    })
+    assert state["build_failures"] == 3  # the planner's 2, plus this batch's 1
+
+    # An empty scenario state keeps earlier losses instead of resetting to zero.
+    early = nodes.call_llm_2({"operations": [], "scenarios": [[]], "build_failures": 2})
+    assert early["build_failures"] == 2
+
+
 def test_plan_contract_supports_all_request_locations_and_boundary_category():
     plan = PlanModel(**_plan(category="boundary"))
 
@@ -147,20 +186,13 @@ def test_unknown_referenced_fixture_is_quarantined_without_transport(tmp_path: P
         generate(plans_path, output_path)
 
     generated = output_path.read_text(encoding="utf-8")
+    # The rendered file must be importable Python — a template whitespace bug
+    # once emitted body lines at column 0, which only surfaced at runtime.
+    compile(generated, str(output_path), "exec")
     function_source = generated.split("def test_get_customer():", 1)[1]
     assert "pytest.skip(" in function_source
     assert unknown_key in function_source
     assert "send_request" not in function_source
-
-    jinja_output_path = tmp_path / "test_generated_jinja.py"
-    with pytest.warns(UserWarning, match=rf"undefined fixture\(s\): {unknown_key}"):
-        generate_jinja(plans_path, jinja_output_path)
-    jinja_function = jinja_output_path.read_text(encoding="utf-8").split(
-        "def test_get_customer():", 1
-    )[1]
-    assert "pytest.skip(" in jinja_function
-    assert unknown_key in jinja_function
-    assert "send_request" not in jinja_function
 
     def unexpected_request(**kwargs):
         pytest.fail(f"transport must not be called for an invalid plan: {kwargs}")
@@ -237,6 +269,7 @@ def test_generator_keeps_advisory_plan_and_empty_response_assertion(tmp_path: Pa
         generate(plans_path, output_path)
 
     generated = output_path.read_text(encoding="utf-8")
+    compile(generated, str(output_path), "exec")
     assert "def test_get_customer():" in generated
     assert "'expertId': 'fallback-expert'" in generated
     assert "assert_response(resp.json(), {}" in generated
@@ -273,6 +306,47 @@ def test_extension_only_file_sentinel_selects_matching_fixture():
     assert path.name == "sample.pdf"
 
 
+def test_a_status_patch_with_a_response_sentinel_in_a_request_field_is_refused():
+    """A live run saw <GENERATED> patched into request_body — the runner would
+    have sent that literal string to the server."""
+    plan = _plan()
+
+    reason = _apply(
+        plan,
+        NamedPatch(
+            name="test_get_customer",
+            action="patch",
+            reason="swap the plate",
+            request_body={"registrationNumber": "<GENERATED>"},
+        ),
+        kind="status",
+    )
+
+    assert reason and "sentinel" in reason
+    assert plan["request_body"] is None  # untouched
+
+    # Nested occurrences are caught too, and legit request sentinels stay fine.
+    plan2 = _plan()
+    reason2 = _apply(
+        plan2,
+        NamedPatch(name="t", action="patch", reason="r",
+                   request_body={"items": [{"plate": "<ANY_STRING>"}]}),
+        kind="status",
+    )
+    assert reason2 and "sentinel" in reason2
+    assert plan2["request_body"] is None
+
+    plan3 = _plan()
+    reason3 = _apply(
+        plan3,
+        NamedPatch(name="t", action="patch", reason="r",
+                   request_body={"note": "<FIXTURE:expert_code>", "doc": "<FILE:pdf>"}),
+        kind="status",
+    )
+    assert reason3 is None
+    assert plan3["request_body"] == {"note": "<FIXTURE:expert_code>", "doc": "<FILE:pdf>"}
+
+
 def test_public_request_does_not_require_credentials(monkeypatch):
     captured = {}
 
@@ -282,10 +356,19 @@ def test_public_request_does_not_require_credentials(monkeypatch):
 
     monkeypatch.setattr(_test_support.requests, "request", fake_request)
     monkeypatch.delenv("DIGIEXPERT_API_KEY", raising=False)
+    monkeypatch.setenv("API_BASE_URL", "https://example.test/api")
 
     _test_support.send_request("GET", "/health", None, "application/json")
 
     assert captured["headers"] == {}
+
+
+def test_request_without_a_base_url_is_refused(monkeypatch):
+    """No silent fallback: an unset target must stop the suite, not pick one."""
+    monkeypatch.delenv("API_BASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="API_BASE_URL"):
+        _test_support.send_request("GET", "/health", None, "application/json")
 
 
 def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
@@ -296,6 +379,7 @@ def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
         return object()
 
     monkeypatch.setattr(_test_support.requests, "request", fake_request)
+    monkeypatch.setenv("API_BASE_URL", "https://example.test/api")
     monkeypatch.setenv("DIGIEXPERT_API_KEY", "company-api-key")
     monkeypatch.setenv("API_JWT", "legacy-jwt")
     monkeypatch.setenv("DIGIEXPERT_JWT", "legacy-jwt")
@@ -315,6 +399,7 @@ def test_jwt_requirement_is_ignored_and_api_key_is_attached(monkeypatch):
 
 def test_protected_request_reports_missing_credential(monkeypatch):
     monkeypatch.delenv("DIGIEXPERT_API_KEY", raising=False)
+    monkeypatch.setenv("API_BASE_URL", "https://example.test/api")
 
     with pytest.raises(RuntimeError, match="API-key-protected"):
         _test_support.send_request(

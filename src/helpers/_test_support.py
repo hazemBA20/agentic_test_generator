@@ -21,7 +21,23 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 load_dotenv()
 
-BASE_URL = os.environ.get("API_BASE_URL", "https://test.patch.digiclaim.tn/api")
+BASE_URL = os.environ.get("API_BASE_URL")
+
+
+def _base_url() -> str:
+    """Read the target at request time, so a late .env or shell export counts.
+
+    Refusing to guess matters more here than for the key: silently falling back
+    to a developer's remembered staging URL can point generated write requests
+    at a real environment.
+    """
+    base = os.environ.get("API_BASE_URL") or BASE_URL
+    if not base:
+        raise RuntimeError(
+            "API_BASE_URL is not set — refusing to guess the target environment. "
+            "Export it in your shell or add it to .env at the repo root."
+        )
+    return base
 
 
 def _api_key() -> str | None:
@@ -246,7 +262,7 @@ def send_request(
 
     kwargs = {
         "method": method,
-        "url": f"{BASE_URL}{rendered_path}",
+        "url": f"{_base_url()}{rendered_path}",
         "headers": _request_headers(headers, requires_api_key),
         "params": query_params or None,
         "timeout": 15,

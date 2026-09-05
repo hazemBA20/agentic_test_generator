@@ -1,6 +1,7 @@
-# Notes, evaluations and guides are working documents — only the README ships.
+# Notes, evaluations and guides are working documents — only the README and CHANGES.md ship.
 *.md
 !README.md
+!CHANGES.md
 
 # Generated artifacts: the plans, the rendered suite, and every run report.
 src/helpers/test.py
@@ -13,8 +14,6 @@ src/helpers/coverage_report.json
 spec.json
 config.yaml
 .env
-pyproject.toml
-pyrightconfig.json
 
 # Stray suites at the repo root (scratch runs of the generated tests).
 pytest.py
