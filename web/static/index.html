@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic Test Generator</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Agentic Test Generator</h1>
+      <p class="subtitle">Spec in, pytest out — powered by the same pipeline as <code>src/main.py</code></p>
+    </div>
+    <div id="health" class="health" title="Environment prerequisites"></div>
+  </header>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <main>
+
+    <!-- Step 1: upload -->
+    <section class="step" id="step-upload">
+      <h2><span class="step-num">1</span> Upload a spec</h2>
+      <div id="dropzone" class="dropzone">
+        <p><strong>Drop an OpenAPI / Swagger / Postman file here</strong></p>
+        <p class="muted">.json, .yaml or .yml — or</p>
+        <label class="button">
+          Choose a file
+          <input type="file" id="spec-input" accept=".json,.yaml,.yml" hidden>
+        </label>
+      </div>
+      <div id="upload-result" class="upload-result hidden"></div>
+    </section>
+
+    <!-- Step 2: fixtures -->
+    <section class="step" id="step-fixtures">
+      <h2><span class="step-num">2</span> Fixtures</h2>
+      <p class="muted">
+        Data keys go into <code>src/helpers/fixture/test_data.json</code> and are offered to the
+        builder as <code>&lt;FIXTURE:key&gt;</code>. Files go into <code>src/helpers/fixture/</code>
+        for <code>&lt;FILE:...&gt;</code> uploads.
+      </p>
+      <div class="columns">
+        <div class="card">
+          <h3>What the selected operation will need</h3>
+          <div class="row">
+            <select id="needs-op" class="select"></select>
+            <button id="needs-refresh" class="button subtle" type="button">Scan</button>
+          </div>
+          <div id="needs-panel" class="needs-panel"><p class="muted">Upload a spec and pick an operation to scan.</p></div>
+        </div>
+        <div class="card">
+          <h3>Fixture data keys</h3>
+          <table class="table" id="fixture-table">
+            <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+            <tbody id="fixture-rows"></tbody>
+          </table>
+          <div class="row">
+            <input id="new-key" class="input" placeholder="new_key">
+            <input id="new-value" class="input" placeholder='value, e.g. "008/26"'>
+            <button id="add-key" class="button subtle" type="button">Add</button>
+          </div>
+          <h3 class="spaced">Fixture files</h3>
+          <ul id="fixture-files" class="file-list"></ul>
+          <label class="button subtle">
+            Upload a file
+            <input type="file" id="fixture-file-input" hidden>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3: operations -->
+    <section class="step" id="step-operations">
+      <h2><span class="step-num">3</span> Choose an operation</h2>
+      <div id="operations" class="operations"><p class="muted">Upload a spec first.</p></div>
+    </section>
+
+    <!-- Step 4: pipeline -->
+    <section class="step" id="step-generate">
+      <h2><span class="step-num">4</span> Run the pipeline</h2>
+      <div class="row" id="scope-row">
+        <label class="scope"><input type="radio" name="scope" value="operation" checked>
+          Selected operation <span id="selected-label" class="muted">no operation selected</span></label>
+        <label class="scope"><input type="radio" name="scope" value="all">
+          All <span id="scope-all-count">0</span> operations</label>
+      </div>
+      <div class="row" id="options-row">
+        <label class="scope" title="Audit spec coverage and let the builder fill gaps"><input type="checkbox" id="opt-coverage"> Coverage audit + fill gaps</label>
+        <label class="scope" title="Execute plans against the target API"><input type="checkbox" id="opt-run"> Run against live API</label>
+        <label class="scope" title="One constrained LLM rewrite pass over failures, then re-execution"><input type="checkbox" id="opt-review"> Review failures + verify</label>
+      </div>
+      <p class="muted" id="options-hint"></p>
+      <div class="row">
+        <button id="generate-btn" class="button primary" type="button">Start pipeline</button>
+        <span id="job-spinner" class="spinner hidden" aria-label="working"></span>
+      </div>
+      <div id="job-error" class="banner error hidden"></div>
+      <div id="job-progress" class="progress hidden">
+        <div class="progress-head">
+          <strong id="progress-label">Warming up…</strong>
+          <span id="progress-elapsed" class="muted"></span>
+        </div>
+        <div class="progress-bar"><div id="progress-fill"></div></div>
+        <ol id="progress-steps" class="progress-steps"></ol>
+        <p id="progress-note" class="muted progress-note"></p>
+      </div>
+      <div id="fixture-banner" class="banner warn hidden"></div>
+      <div id="plans-result" class="hidden"></div>
+
+      <div id="run-area" class="hidden">
+        <h3 class="spaced">Run against the live API</h3>
+        <div class="row">
+          <label for="target-input" class="muted">Target</label>
+          <input id="target-input" class="input" placeholder="https://test-api.example.com/api" style="flex:1;min-width:220px">
+          <button id="target-save" class="button subtle" type="button">Set</button>
+          <button id="target-clear" class="button subtle" type="button">Use .env</button>
+        </div>
+        <p class="muted" id="target-status"></p>
+        <div class="row">
+          <button id="run-btn" class="button" type="button">Run tests</button>
+          <span class="muted">sends real requests to the target above</span>
+        </div>
+        <div id="run-result"></div>
+      </div>
+    </section>
+
+  </main>
+  <footer class="muted">
+    Local tool — artifacts land in <code>web/workspace/</code>; fixture edits write to the shared
+    <code>src/helpers/fixture/</code> store. Nothing else in the project is touched.
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

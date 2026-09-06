@@ -25,3 +25,8 @@ test.py
 __pycache__/
 *.py[cod]
 avidea-mind-openapi.yaml
+/sample
+
+/src/helpers/fixtures/*.jpg
+
+/src/helpers/fixture/*.jpeg

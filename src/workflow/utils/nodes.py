@@ -23,16 +23,14 @@ from workflow.utils.prompts import (
     COVERAGE_AUDITOR_SYSTEM_PROMPT,
     COVERAGE_AUDITOR_USER_PROMPT,
 )
-from workflow.utils.provider import gemini_model, groq_model , explabs_model
+from workflow.utils.provider import gemini_model, groq_model, openrouter_model
 
 load_dotenv()
 
 FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
 
-#scenario_planner = gemini_model().with_structured_output(Scenarios)
-
-scenario_planner = explabs_model().with_structured_output(Scenarios)
+scenario_planner = openrouter_model().with_structured_output(Scenarios)
 test_builder = gemini_model().with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
@@ -256,14 +254,30 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
 
 
 async def _build_all(
-    operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]
+    operations: list[dict],
+    scenarios_per_operation: list[list[ScenarioSpec]],
+    progress_cb=None,
 ) -> tuple[list[TestPlan], int]:
-    tasks = [
-        _build_batch(operation, batch)
+    """Build every batch; ``progress_cb(completed, total)`` is best-effort UI
+    feedback (None in terminal use) and never affects the result."""
+    batches = [
+        (operation, batch)
         for operation, scenarios in zip(operations, scenarios_per_operation)
         for batch in _chunked(scenarios, BUILD_BATCH_SIZE)
     ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    total = len(batches)
+    completed = 0
+
+    async def _one(operation: dict, batch: list[ScenarioSpec]):
+        nonlocal completed
+        try:
+            return await _build_batch(operation, batch)
+        finally:
+            completed += 1
+            if progress_cb is not None:
+                progress_cb(completed, total)
+
+    results = await asyncio.gather(*(_one(op, batch) for op, batch in batches), return_exceptions=True)
 
     all_plans = []
     failed_batches = 0
@@ -277,7 +291,9 @@ async def _build_all(
 
 
 def build_plans_with_failures(
-    operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]
+    operations: list[dict],
+    scenarios_per_operation: list[list[ScenarioSpec]],
+    progress_cb=None,
 ) -> tuple[list[TestPlan], int]:
     """Build plans, and report how many batches died on the way.
 
@@ -286,7 +302,7 @@ def build_plans_with_failures(
     artifact has to know that before it writes, so the count is returned rather
     than only printed.
     """
-    return _run(_build_all(operations, scenarios_per_operation))
+    return _run(_build_all(operations, scenarios_per_operation, progress_cb))
 
 
 def build_plans(

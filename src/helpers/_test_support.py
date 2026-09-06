@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import uuid
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
@@ -23,6 +24,12 @@ load_dotenv()
 
 BASE_URL = os.environ.get("API_BASE_URL")
 
+# Web-UI target override (frontend runs only). None by default, so the
+# terminal/pytest path resolves exactly as it always has. The web pipeline
+# sets this around a run via ``base_url_override``; nothing outside web/
+# touches it.
+BASE_URL_OVERRIDE: str | None = None
+
 
 def _base_url() -> str:
     """Read the target at request time, so a late .env or shell export counts.
@@ -31,7 +38,7 @@ def _base_url() -> str:
     to a developer's remembered staging URL can point generated write requests
     at a real environment.
     """
-    base = os.environ.get("API_BASE_URL") or BASE_URL
+    base = BASE_URL_OVERRIDE or os.environ.get("API_BASE_URL") or BASE_URL
     if not base:
         raise RuntimeError(
             "API_BASE_URL is not set — refusing to guess the target environment. "
@@ -125,20 +132,39 @@ def _resolve_fixture(sentinel: str) -> tuple[str, Path]:
     # Tolerate the common model shorthand <FILE:pdf> as <FILE:sample.pdf>
     # rather than treating "pdf" as an extensionless filename and selecting an
     # unrelated fallback file.
-    if re.fullmatch(r"[A-Za-z0-9]+", filename):
+    shorthand = bool(re.fullmatch(r"[A-Za-z0-9]+", filename))
+    if shorthand:
         filename = f"sample.{filename.lower()}"
     requested = Path(filename)
     if requested.name != filename or filename in {"", ".", ".."}:
         raise ValueError(f"Unsafe fixture name {filename!r}")
 
+    session_hits = _session_ranked(requested.suffix.lower())
     path = FIXTURES_DIR / requested.name
+    # A generic shorthand ("give me a jpg") yields to a file uploaded in this
+    # web session; an explicit name that exists on disk always wins, exactly
+    # as before. With no session uploads configured this branch is identical
+    # to the historical behavior.
+    if path.exists() and not (shorthand and session_hits):
+        return requested.name, path
+    if shorthand and session_hits:
+        return session_hits[0].name, session_hits[0]
     if not path.exists():
         # Specs commonly name uploads differently. Reuse a representative local
         # sample with the requested extension (or any sample as a final fallback)
         # while preserving the requested filename in the multipart upload.
+        # Session uploads rank first within each tier.
         suffix = requested.suffix.lower()
-        candidates = sorted(FIXTURES_DIR.glob(f"*{suffix}")) if suffix else []
-        candidates += sorted(p for p in FIXTURES_DIR.iterdir() if p.is_file() and p not in candidates)
+        candidates = list(session_hits)
+        if suffix:
+            candidates += sorted(
+                p for p in FIXTURES_DIR.glob(f"*{suffix}")
+                if p not in candidates
+            )
+        candidates += sorted(
+            p for p in FIXTURES_DIR.iterdir()
+            if p.is_file() and p not in candidates
+        )
         path = next(iter(candidates), None)
     if path is None or not path.is_file():
         raise FileNotFoundError(
@@ -146,6 +172,59 @@ def _resolve_fixture(sentinel: str) -> tuple[str, Path]:
             f"{FIXTURES_DIR}. Add a representative file there."
         )
     return requested.name, path
+
+
+# ---------------------------------------------------------------------------
+# Web-session file preference (frontend runs only)
+# ---------------------------------------------------------------------------
+# Names of fixture files uploaded through the web UI in the current session,
+# most-recent first. Empty by default, so the terminal/pytest path resolves
+# exactly as it always has. The web pipeline sets this around a run via
+# ``preferred_files``; nothing outside web/ touches it.
+PREFERRED_FILES: tuple[str, ...] = ()
+
+
+def _session_ranked(suffix: str) -> list[Path]:
+    """Session uploads that exist on disk: same-extension first, then the rest.
+
+    Recency order is preserved within each tier.
+    """
+    same: list[Path] = []
+    other: list[Path] = []
+    seen: set[str] = set()
+    for name in PREFERRED_FILES:
+        if name in seen:
+            continue
+        seen.add(name)
+        candidate = FIXTURES_DIR / Path(name).name
+        if not candidate.is_file():
+            continue
+        (same if candidate.suffix.lower() == suffix else other).append(candidate)
+    return same + other
+
+
+@contextmanager
+def preferred_files(names: list[str] | tuple[str, ...] | None):
+    """Temporarily prefer web-session uploads in ``_resolve_fixture``."""
+    global PREFERRED_FILES
+    previous = PREFERRED_FILES
+    PREFERRED_FILES = tuple(names or ())
+    try:
+        yield
+    finally:
+        PREFERRED_FILES = previous
+
+
+@contextmanager
+def base_url_override(url: str | None):
+    """Temporarily override the target base URL (web runs only)."""
+    global BASE_URL_OVERRIDE
+    previous = BASE_URL_OVERRIDE
+    BASE_URL_OVERRIDE = url or None
+    try:
+        yield
+    finally:
+        BASE_URL_OVERRIDE = previous
 
 
 def split_multipart(body: dict | None) -> tuple[dict, list]:

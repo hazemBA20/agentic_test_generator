@@ -47,7 +47,7 @@ def groq_model():
 def openrouter_model():
     """The failure rewriter, kept on its own provider and quota."""
     return ChatOpenRouter(
-        model=os.getenv("REWRITE_MODEL", "deepseek/deepseek-v4-flash"),
+        model=os.getenv("REWRITE_MODEL", "anthropic/claude-opus-4.1"),
         temperature=0,
         max_tokens=8000,
         reasoning={"effort": "low"},

@@ -96,8 +96,11 @@ def execute_plan(plan: dict, issues: list[str] | None = None) -> dict:
     }
 
 
-def execute_plans(plans: list[dict]) -> list[dict]:
+def execute_plans(plans: list[dict], progress_cb=None) -> list[dict]:
+    """Run every plan; ``progress_cb(completed, total)`` is best-effort UI
+    feedback (None in terminal use) and never affects the results."""
     issues_by_plan = validate_plans(plans)
+    total = len(plans)
     results = []
     for index, (plan, issues) in enumerate(zip(plans, issues_by_plan)):
         if not isinstance(plan, dict):
@@ -110,6 +113,8 @@ def execute_plans(plans: list[dict]) -> list[dict]:
             })
         else:
             results.append(execute_plan(plan, issues))
+        if progress_cb is not None:
+            progress_cb(index + 1, total)
     return results
 
 
