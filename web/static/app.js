@@ -378,7 +378,6 @@ function selectOperation(index, { syncList = false } = {}) {
   $("selected-label").innerHTML = op
     ? `selected: ${methodBadge(op.method)} <code>${esc(op.path)}</code>`
     : "no operation selected";
-  $("generate-btn").disabled = !op;
   if (syncList) renderOperations();
   else {
     document.querySelectorAll("label.operation").forEach((label) =>

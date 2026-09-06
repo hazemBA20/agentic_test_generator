@@ -3,5 +3,7 @@
   "missionReference": "008/26",
   "requestid": 123,
   "missiontype": "NORMAL_EXPERTISE",
-  "expertcode": "HAZEM_EXPERT"
+  "expertcode": "HAZEM_EXPERT",
+  "documenttype": "QUOTE",
+  "data": "testtesttesttesttest"
 }

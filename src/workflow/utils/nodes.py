@@ -23,14 +23,14 @@ from workflow.utils.prompts import (
     COVERAGE_AUDITOR_SYSTEM_PROMPT,
     COVERAGE_AUDITOR_USER_PROMPT,
 )
-from workflow.utils.provider import gemini_model, groq_model, openrouter_model
+from workflow.utils.provider import gemini_model, groq_model, planner_model
 
 load_dotenv()
 
 FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
 
-scenario_planner = openrouter_model().with_structured_output(Scenarios)
+scenario_planner = planner_model().with_structured_output(Scenarios)
 test_builder = gemini_model().with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.

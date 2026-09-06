@@ -2,8 +2,9 @@
 
 Every factory reads its model name from the environment so a
 quota-exhausted model can be swapped without a code edit: GOOGLE_MODEL,
-GROQ_MODEL, and (for the failure rewriter) REWRITE_MODEL. Keys come from
-GEMINI_API_KEY, groq_key (or GROQ_API_KEY), and OPENROUTER_API_KEY.
+GROQ_MODEL, PLANNER_MODEL, and (for the failure rewriter) REWRITE_MODEL.
+Keys come from GEMINI_API_KEY, groq_key (or GROQ_API_KEY), and
+OPENROUTER_API_KEY.
 """
 import os
 
@@ -47,7 +48,18 @@ def groq_model():
 def openrouter_model():
     """The failure rewriter, kept on its own provider and quota."""
     return ChatOpenRouter(
-        model=os.getenv("REWRITE_MODEL", "anthropic/claude-opus-4.1"),
+        model=os.getenv("REWRITE_MODEL", "anthropic/claude-fable-5.1"),
+        temperature=0,
+        max_tokens=8000,
+        reasoning={"effort": "low"},
+    )
+
+
+def planner_model():
+    """The scenario planner: OpenRouter pinned to Fable, independent of the
+    rewriter's REWRITE_MODEL so retuning the reviewer never moves planning."""
+    return ChatOpenRouter(
+        model=os.getenv("PLANNER_MODEL", "minimax/minimax-m3:free"),
         temperature=0,
         max_tokens=8000,
         reasoning={"effort": "low"},
