@@ -336,6 +336,9 @@ def rewrite_plans(plans: list[dict], results: list[dict]) -> tuple[list[dict], i
 
         candidates.append({"plan": plan, "result": result})
 
+    if not candidates:
+        return plans, 0, log_entries
+
     llm = _rewriter()
     patched = 0
     for batch in _chunked(candidates, REWRITE_BATCH_SIZE):
