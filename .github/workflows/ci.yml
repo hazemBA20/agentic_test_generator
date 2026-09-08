@@ -16,4 +16,4 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       # The suite is offline: no API keys, no target API, no model calls.
-      - run: pytest
+      - run: python -m pytest

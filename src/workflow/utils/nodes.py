@@ -32,12 +32,21 @@ load_dotenv()
 FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
 
-scenario_planner =  explabs_model().with_structured_output(Scenarios)
+@lru_cache(maxsize=1)
+def _scenario_planner():
+    return explabs_model().with_structured_output(Scenarios)
 
-test_builder = gemini_model().with_structured_output(TestPlans)
+
+@lru_cache(maxsize=1)
+def _test_builder():
+    return gemini_model().with_structured_output(TestPlans)
+
+
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
-coverage_auditor = explabs_model().with_structured_output(CoverageGaps)
+@lru_cache(maxsize=1)
+def _coverage_auditor():
+    return explabs_model().with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and
@@ -220,7 +229,7 @@ async def _plan_operation(operation: dict) -> list[ScenarioSpec]:
     async def _invoke():
         op_payload = json.dumps(operation, ensure_ascii=False, default=str)
         user_content = SCENARIO_PLANNER_USER_PROMPT.format(operation=op_payload)
-        return await scenario_planner.ainvoke(
+        return await _scenario_planner().ainvoke(
             [SystemMessage(content=SCENARIO_PLANNER_SYSTEM_PROMPT), HumanMessage(content=user_content)]
         )
 
@@ -297,7 +306,7 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
         op_payload = json.dumps(_builder_operation(operation), ensure_ascii=False, default=str)
         scenarios_payload = json.dumps([s.model_dump() for s in batch], ensure_ascii=False)
         user_content = TEST_BUILDER_USER_PROMPT.format(operation=op_payload, scenarios=scenarios_payload)
-        return await test_builder.ainvoke(
+        return await _test_builder().ainvoke(
             [SystemMessage(content=TEST_BUILDER_SYSTEM_PROMPT), HumanMessage(content=user_content)]
         )
 
@@ -453,7 +462,7 @@ async def _audit_batch(wrapper: dict, plans: list[dict], report: dict, unfilled:
             checklist=json.dumps(report["checklist"], ensure_ascii=False),
             unfilled=json.dumps(unfilled, ensure_ascii=False) if unfilled else "(none)",
         )
-        return await coverage_auditor.ainvoke(
+        return await _coverage_auditor().ainvoke(
             [
                 SystemMessage(content=COVERAGE_AUDITOR_SYSTEM_PROMPT),
                 HumanMessage(content=user_content),
