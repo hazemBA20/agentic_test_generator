@@ -12,5 +12,5 @@ python-dotenv==1.2.2
 PyYAML==6.0.3
 Jinja2==3.1.6
 fastapi==0.116.1
-python-multipart==0.0.20
+python-multipart==0.0.30
 pytest==9.1.1
