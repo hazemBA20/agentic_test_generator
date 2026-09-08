@@ -2,8 +2,9 @@
 
 Every factory reads its model name from the environment so a
 quota-exhausted model can be swapped without a code edit: GOOGLE_MODEL,
-GROQ_MODEL, and (for the failure rewriter) REWRITE_MODEL. Keys come from
-GEMINI_API_KEY, groq_key (or GROQ_API_KEY), and OPENROUTER_API_KEY.
+GROQ_MODEL, PLANNER_MODEL, and (for the failure rewriter) REWRITE_MODEL.
+Keys come from GEMINI_API_KEY, groq_key (or GROQ_API_KEY), and
+OPENROUTER_API_KEY.
 """
 import os
 
@@ -13,7 +14,16 @@ from langchain_groq import ChatGroq
 from langchain_openrouter import ChatOpenRouter
 
 load_dotenv()
+from langchain_openai import ChatOpenAI
 
+# Initialize the model pointing to your external link
+def explabs_model():
+    """Judgment tasks: the scenario planner and the coverage auditor."""
+    return ChatOpenAI(
+        model="gpt-6-astra" ,
+        openai_api_key=os.getenv("EXPLABS_API_KEY"),
+        base_url="https://api.experientiallabs.ai/v1",
+    )
 
 def gemini_model():
     """Judgment tasks: the scenario planner and the coverage auditor."""
@@ -38,7 +48,26 @@ def groq_model():
 def openrouter_model():
     """The failure rewriter, kept on its own provider and quota."""
     return ChatOpenRouter(
-        model=os.getenv("REWRITE_MODEL", "deepseek/deepseek-v4-flash"),
+        model=os.getenv("REWRITE_MODEL", "anthropic/claude-fable-5.1"),
+        temperature=0,
+        max_tokens=8000,
+        reasoning={"effort": "low"},
+    )
+
+
+def planner_model():
+    """The scenario planner: OpenRouter pinned to Fable, independent of the
+    rewriter's REWRITE_MODEL so retuning the reviewer never moves planning."""
+    return ChatOpenRouter(
+        model=os.getenv("PLANNER_MODEL", "minimax/minimax-m3:free"),
+        temperature=0,
+        max_tokens=8000,
+        reasoning={"effort": "low"},
+    )
+def sol_model():
+    """The failure rewriter, kept on its own provider and quota."""
+    return ChatOpenRouter(
+        model=os.getenv("SOL_MODEL", "solana/solana-v1.0"),
         temperature=0,
         max_tokens=8000,
         reasoning={"effort": "low"},
