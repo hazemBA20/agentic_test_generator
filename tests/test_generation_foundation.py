@@ -409,3 +409,97 @@ def test_protected_request_reports_missing_credential(monkeypatch):
             "application/json",
             requires_api_key=True,
         )
+
+
+def test_llm_error_classification(monkeypatch):
+    """Provider text maps to a short cause for UI notices, never a secret."""
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    assert nodes.classify_llm_error(RuntimeError("Error code: 429 - slow down")) == "rate_limit"
+    assert nodes.classify_llm_error(RuntimeError("TPM rate_limit_exceeded")) == "rate_limit"
+    assert nodes.classify_llm_error(RuntimeError("Key limit exceeded (total limit)")) == "quota_exhausted"
+    assert nodes.classify_llm_error(RuntimeError("insufficient credits")) == "quota_exhausted"
+    assert nodes.classify_llm_error(RuntimeError("401 Unauthorized")) == "auth"
+    assert nodes.classify_llm_error(ValueError("cannot parse structured output")) == "model_error"
+
+
+def test_llm_retry_events_reach_listeners(monkeypatch):
+    """Retries notify registered listeners; fatal errors raise silently."""
+    import asyncio as _asyncio
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(_asyncio, "sleep", _no_sleep)
+
+    calls = {"n": 0}
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("Error code: 429 - rate limit reached")
+        return "ok"
+
+    events = []
+    with nodes.llm_event_listener(events.append):
+        assert nodes._run(nodes._call_with_retry(flaky, where="builder")) == "ok"
+    assert [event["attempt"] for event in events] == [1, 2]
+    assert all(
+        event["kind"] == "retry"
+        and event["cause"] == "rate_limit"
+        and event["where"] == "builder"
+        for event in events
+    )
+
+    # Outside the context the listener hears nothing more.
+    state = {"n": 0}
+
+    async def once():
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("429 boom")
+        return "ok"
+
+    assert nodes._run(nodes._call_with_retry(once)) == "ok"
+    assert len(events) == 2
+
+    # A non-retryable error raises immediately with no retry event.
+    async def fatal():
+        raise ValueError("cannot parse structured output")
+
+    with pytest.raises(ValueError):
+        nodes._run(nodes._call_with_retry(fatal))
+    assert len(events) == 2
+
+
+def test_llm_listener_failures_do_not_break_retries(monkeypatch):
+    """One bad listener must not swallow retries or starve other listeners."""
+    import asyncio as _asyncio
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "src"))
+    nodes = importlib.import_module("workflow.utils.nodes")
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(_asyncio, "sleep", _no_sleep)
+
+    calls = {"n": 0}
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("429 boom")
+        return "ok"
+
+    def bad_listener(_event):
+        raise RuntimeError("listener blew up")
+
+    seen = []
+    with nodes.llm_event_listener(bad_listener), nodes.llm_event_listener(seen.append):
+        assert nodes._run(nodes._call_with_retry(flaky)) == "ok"
+    assert len(seen) == 1 and seen[0]["kind"] == "retry"

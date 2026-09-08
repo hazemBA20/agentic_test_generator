@@ -3,6 +3,7 @@ import json
 import random
 import re
 import time
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -24,19 +25,19 @@ from workflow.utils.prompts import (
     COVERAGE_AUDITOR_SYSTEM_PROMPT,
     COVERAGE_AUDITOR_USER_PROMPT,
 )
-from workflow.utils.provider import gemini_model, groq_model, planner_model
+from workflow.utils.provider import gemini_model, groq_model, planner_model , explabs_model 
 
 load_dotenv()
 
 FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
 
-scenario_planner = planner_model().with_structured_output(Scenarios)
+scenario_planner =  explabs_model().with_structured_output(Scenarios)
 
-test_builder = groq_model().with_structured_output(TestPlans)
+test_builder = gemini_model().with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
-coverage_auditor = groq_model().with_structured_output(CoverageGaps)
+coverage_auditor = explabs_model().with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and
@@ -129,7 +130,57 @@ def _is_retryable(exc: Exception) -> bool:
     return "429" in text or "rate limit" in text or "timeout" in text or "503" in text
 
 
-async def _call_with_retry(coro_fn):
+def classify_llm_error(exc: Exception) -> str:
+    """Short machine-readable cause for UI notices: rate_limit, quota_exhausted,
+    auth, or model_error. Never includes secret values — only provider text."""
+    text = str(exc).lower()
+    if "429" in text or "rate limit" in text or "rate_limit" in text:
+        return "rate_limit"
+    if "quota" in text or "credit" in text or "limit exceeded" in text or "insufficient" in text:
+        return "quota_exhausted"
+    if "401" in text or "unauthorized" in text or "invalid" in text and "key" in text:
+        return "auth"
+    return "model_error"
+
+
+# ---------------------------------------------------------------------------
+# LLM event notifications (frontend + CLI progress)
+# ---------------------------------------------------------------------------
+# Module-level listeners so deep async helpers (_call_with_retry, _build_all)
+# can report without threading UI handles through every call. The web pipeline
+# registers one around a run; the terminal path registers none and behaves
+# exactly as before. Listeners must never raise — failures are swallowed.
+_llm_event_listeners: list = []
+
+
+def _notify_llm_event(event: dict) -> None:
+    for listener in list(_llm_event_listeners):
+        try:
+            listener(event)
+        except Exception:
+            continue
+
+
+@contextmanager
+def llm_event_listener(fn):
+    """Collect LLM lifecycle events (retries, dropped batches) for one run.
+
+    Event dicts always carry ``kind`` (``retry`` | ``dropped``) and ``cause``
+    from :func:`classify_llm_error`. Retry events also carry ``attempt``,
+    ``max_attempts`` and ``backoff`` seconds; dropped events carry ``where``
+    (``planner`` | ``builder``) and the truncated provider ``error`` text.
+    """
+    _llm_event_listeners.append(fn)
+    try:
+        yield
+    finally:
+        try:
+            _llm_event_listeners.remove(fn)
+        except ValueError:
+            pass
+
+
+async def _call_with_retry(coro_fn, where: str = "model"):
     for attempt in range(MAX_RETRIES):
         try:
             await _rate_limiter.acquire()
@@ -143,6 +194,17 @@ async def _call_with_retry(coro_fn):
                 stage="llm",
                 attempt=attempt + 1,
                 error=str(e),
+            )
+            _notify_llm_event(
+                {
+                    "kind": "retry",
+                    "where": where,
+                    "cause": classify_llm_error(e),
+                    "attempt": attempt + 1,
+                    "max_attempts": MAX_RETRIES,
+                    "backoff": round(backoff, 1),
+                    "error": str(e)[:300],
+                }
             )
             print(f"Retryable error ({e}); backing off {backoff:.1f}s (attempt {attempt + 1}/{MAX_RETRIES})")
             await asyncio.sleep(backoff)
@@ -163,7 +225,7 @@ async def _plan_operation(operation: dict) -> list[ScenarioSpec]:
         )
 
     async with _semaphore:
-        msg = await _call_with_retry(_invoke)
+        msg = await _call_with_retry(_invoke, where="planner")
     return msg.scenarios
 
 
@@ -180,6 +242,15 @@ async def _plan_all(operations: list[dict]) -> tuple[list[list[ScenarioSpec]], i
             print(
                 f"Planning failed for {operation.get('method', '')} {operation.get('path', '')} "
                 f"after retries: {result}"
+            )
+            _notify_llm_event(
+                {
+                    "kind": "dropped",
+                    "where": "planner",
+                    "cause": classify_llm_error(result),
+                    "operation": f"{operation.get('method', '')} {operation.get('path', '')}".strip(),
+                    "error": str(result)[:300],
+                }
             )
             scenarios_per_operation.append([])
             continue
@@ -231,7 +302,7 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
         )
 
     async with _semaphore:
-        msg = await _call_with_retry(_invoke)
+        msg = await _call_with_retry(_invoke, where="builder")
 
     plans = msg.test_plans
     if len(plans) != len(batch):
@@ -289,10 +360,19 @@ async def _build_all(
 
     all_plans = []
     failed_batches = 0
-    for result in results:
+    for (operation, _batch), result in zip(batches, results):
         if isinstance(result, Exception):
             failed_batches += 1
             print(f"Dropping a batch after exhausting retries: {result}")
+            _notify_llm_event(
+                {
+                    "kind": "dropped",
+                    "where": "builder",
+                    "cause": classify_llm_error(result),
+                    "operation": f"{operation.get('method', '')} {operation.get('path', '')}".strip(),
+                    "error": str(result)[:300],
+                }
+            )
             continue
         all_plans.extend(result)
     return all_plans, failed_batches
@@ -381,7 +461,7 @@ async def _audit_batch(wrapper: dict, plans: list[dict], report: dict, unfilled:
         )
 
     async with _semaphore:
-        return await _call_with_retry(_invoke)
+        return await _call_with_retry(_invoke, where="coverage")
 
 
 def _gap_status(gap) -> int | None:

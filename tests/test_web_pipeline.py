@@ -518,6 +518,56 @@ def test_generate_emits_stage_sequence(tmp_path, monkeypatch):
     assert out["tests_generated"] is True
 
 
+def test_generate_surfaces_llm_notices(tmp_path, monkeypatch):
+    """Quota/rate-limit events during generation land in the result for the UI."""
+    from workflow.utils import nodes as nodes_module
+
+    def fake_plan(ops):
+        nodes_module._notify_llm_event({
+            "kind": "retry",
+            "where": "builder",
+            "cause": "rate_limit",
+            "attempt": 1,
+            "max_attempts": 5,
+            "backoff": 2.0,
+            "error": "429",
+        })
+        return ([], 0)
+
+    monkeypatch.setattr(nodes_module, "plan_scenarios", fake_plan)
+    session = pipeline.Session(uploads_dir=tmp_path)
+    session.operations = [{"path": "/p", "method": "GET", "operation": {}}]
+
+    out = pipeline.generate_for_operation(
+        session,
+        0,
+        plans_path=tmp_path / "plans.json",
+        tests_path=tmp_path / "test.py",
+    )
+    assert len(out["llm_notices"]) == 1
+    assert "Rate limit" in out["llm_notices"][0]
+
+
+def test_summarize_llm_event_wording():
+    retry = pipeline.summarize_llm_event({
+        "kind": "retry", "where": "builder", "cause": "rate_limit",
+        "attempt": 2, "max_attempts": 5, "backoff": 4.5, "error": "429",
+    })
+    assert "Rate limit" in retry and "2/5" in retry and "not stuck" in retry
+
+    quota = pipeline.summarize_llm_event({
+        "kind": "dropped", "where": "builder", "cause": "quota_exhausted",
+        "operation": "POST /x", "error": "Key limit exceeded",
+    })
+    assert "quota exhausted" in quota.lower() and "untouched" in quota
+
+    auth = pipeline.summarize_llm_event({
+        "kind": "dropped", "where": "planner", "cause": "auth",
+        "operation": "", "error": "401 Unauthorized",
+    })
+    assert ".env" in auth
+
+
 def test_execute_plans_reports_counts():
     from helpers.execute_plans import execute_plans
 

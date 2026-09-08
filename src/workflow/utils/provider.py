@@ -28,7 +28,7 @@ def explabs_model():
 def gemini_model():
     """Judgment tasks: the scenario planner and the coverage auditor."""
     return ChatGoogleGenerativeAI(
-        model=os.getenv("GOOGLE_MODEL", "gemini-3.5-flash"),
+        model=os.getenv("GOOGLE_MODEL", "gemini-3.6-flash"),
         google_api_key=os.getenv("GEMINI_API_KEY"),
         temperature=0.2,
         max_output_tokens=7900,

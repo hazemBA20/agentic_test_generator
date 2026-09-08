@@ -517,6 +517,47 @@ def _read_json_list(path: Path) -> list:
     return payload if isinstance(payload, list) else []
 
 
+def summarize_llm_event(event: dict) -> str:
+    """One human line per LLM lifecycle event for UI notices and live detail.
+
+    Keeps provider error text truncated — it names models and key IDs, never
+    secret values.
+    """
+    kind = event.get("kind")
+    where = event.get("where") or "model"
+    cause = event.get("cause") or "model_error"
+    if kind == "retry":
+        attempt = event.get("attempt")
+        total = event.get("max_attempts")
+        backoff = event.get("backoff")
+        if cause == "rate_limit":
+            return (
+                f"Rate limit hit on the {where} model — retrying "
+                f"(attempt {attempt}/{total}, waiting ~{backoff}s). "
+                f"The job is waiting, not stuck."
+            )
+        return (
+            f"Transient {where} model error ({cause}) — retrying "
+            f"(attempt {attempt}/{total})."
+        )
+    if kind == "dropped":
+        operation = event.get("operation")
+        scope = f" for {operation}" if operation else ""
+        error = event.get("error") or ""
+        if cause == "quota_exhausted":
+            return (
+                f"Model quota exhausted during {where}{scope}: {error} "
+                f"Re-run once quota renews — saved artifacts are untouched."
+            )
+        if cause == "auth":
+            return (
+                f"Model authentication failed during {where}{scope}: {error} "
+                f"Check the provider key in .env."
+            )
+        return f"A {where} batch failed permanently{scope}: {error}"
+    return f"Model event in {where}: {event.get('error') or cause}"
+
+
 def run_full_pipeline(
     session: Session,
     operation_index: int | None = None,
@@ -576,18 +617,34 @@ def run_full_pipeline(
         "coverage_done": False,
     }
 
+    current = {"stage": "ingest", "label": FULL_PIPELINE_STAGES["ingest"]}
+    llm_notices: list[str] = []
+
     def _emit(node: str) -> None:
+        current["stage"] = node
+        current["label"] = FULL_PIPELINE_STAGES.get(node, node)
         if progress is not None:
             progress({
                 "stage": node,
                 "label": FULL_PIPELINE_STAGES.get(node, node),
             })
 
+    def _on_llm_event(event: dict) -> None:
+        message = summarize_llm_event(event)
+        llm_notices.append(message)
+        if progress is not None and event.get("kind") == "retry":
+            progress({
+                "stage": current["stage"],
+                "label": current["label"],
+                "detail": message,
+            })
+
     from helpers import _test_support
+    from workflow.utils import nodes
 
     workflow = compile_workflow()
     merged: dict = {}
-    with _test_support.preferred_files(preferred_files), _test_support.base_url_override(base_url):
+    with _test_support.preferred_files(preferred_files), _test_support.base_url_override(base_url), nodes.llm_event_listener(_on_llm_event):
         for chunk in workflow.stream(state):
             for node, update in chunk.items():
                 _emit(node)
@@ -610,6 +667,7 @@ def run_full_pipeline(
         },
         "options": {"coverage": coverage, "run_tests": run_tests, "review": review},
         "plans": plans,
+        "llm_notices": llm_notices,
         "builder_failures": merged.get("build_failures") or 0,
         "filled_count": merged.get("filled_count") or 0,
         "patched_count": merged.get("patched_count") or 0,
@@ -664,26 +722,35 @@ def generate_for_operation(
     plans_path = Path(plans_path)
     tests_path = Path(tests_path)
 
+    llm_notices: list[str] = []
+
+    def _on_llm_event(event: dict) -> None:
+        message = summarize_llm_event(event)
+        llm_notices.append(message)
+        if progress is not None and event.get("kind") == "retry":
+            _emit("building", message)
+
     _emit("planning", "Planning scenarios")
-    scenarios, planner_failures = nodes.plan_scenarios([operation])
-    plans: list[dict] = []
-    builder_failures = 0
-    if any(scenarios):
-        batch_size = nodes.BUILD_BATCH_SIZE
-        total_batches = sum(
-            (len(op_scenarios) + batch_size - 1) // batch_size
-            for op_scenarios in scenarios
-            if op_scenarios
-        )
-        _emit("building", "Building test plans", 0, total_batches)
+    with nodes.llm_event_listener(_on_llm_event):
+        scenarios, planner_failures = nodes.plan_scenarios([operation])
+        plans: list[dict] = []
+        builder_failures = 0
+        if any(scenarios):
+            batch_size = nodes.BUILD_BATCH_SIZE
+            total_batches = sum(
+                (len(op_scenarios) + batch_size - 1) // batch_size
+                for op_scenarios in scenarios
+                if op_scenarios
+            )
+            _emit("building", "Building test plans", 0, total_batches)
 
-        def _on_batch(done: int, total: int) -> None:
-            _emit("building", "Building test plans", done, total)
+            def _on_batch(done: int, total: int) -> None:
+                _emit("building", "Building test plans", done, total)
 
-        built, builder_failures = nodes.build_plans_with_failures(
-            [operation], scenarios, progress_cb=_on_batch if progress is not None else None
-        )
-        plans = [_plan_dict(plan) for plan in built]
+            built, builder_failures = nodes.build_plans_with_failures(
+                [operation], scenarios, progress_cb=_on_batch if progress is not None else None
+            )
+            plans = [_plan_dict(plan) for plan in built]
 
     tests_generated = False
     if plans:
@@ -698,6 +765,7 @@ def generate_for_operation(
     return {
         "operation": summarize_operations([operation])[0],
         "plans": plans,
+        "llm_notices": llm_notices,
         "planner_failures": planner_failures,
         "builder_failures": builder_failures,
         "issues_by_plan": issues_by_plan,

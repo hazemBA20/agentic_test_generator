@@ -527,6 +527,11 @@ function renderProgress(job) {
   if (state.jobStartedAt) {
     $("progress-elapsed").textContent = `${Math.floor((Date.now() - state.jobStartedAt) / 1000)}s elapsed`;
   }
+  if (update.detail) {
+    // Live model-provider warning (e.g. rate limit backoff) — show it verbatim.
+    $("progress-note").textContent = update.detail;
+    return;
+  }
   const notes = FUN_NOTES[update.stage] || [];
   if (notes.length) {
     if (state.noteStage !== update.stage) {
@@ -562,6 +567,11 @@ function renderFullProgress(job) {
   $("progress-label").textContent = update.label || "Running pipeline…";
   if (state.jobStartedAt) {
     $("progress-elapsed").textContent = `${Math.floor((Date.now() - state.jobStartedAt) / 1000)}s elapsed`;
+  }
+  if (update.detail) {
+    // Live model-provider warning (e.g. rate limit backoff) — show it verbatim.
+    $("progress-note").textContent = update.detail;
+    return;
   }
   const pool = FULL_NOTE_POOL[update.stage];
   const notes = (pool && FUN_NOTES[pool]) || [];
@@ -649,6 +659,12 @@ function fetchTestsSource() {
     .catch(() => { $("tests-source").textContent = "(no test file was generated)"; });
 }
 
+function llmNoticesHTML(result) {
+  const notices = result.llm_notices || [];
+  if (!notices.length) return "";
+  return `<div class="banner warn"><strong>Model provider notices</strong><ul>${notices.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></div>`;
+}
+
 function renderGeneration(result) {
   const plans = result.plans || [];
   $("plans-result").classList.remove("hidden");
@@ -676,6 +692,7 @@ function renderGeneration(result) {
     ${table}
     ${issues.length ? `<div class="banner warn"><strong>Validation warnings</strong><ul>${issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>` : ""}
     ${warnings.length ? `<div class="banner warn"><ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+    ${llmNoticesHTML(result)}
     <div class="row spaced">
       <a class="button subtle" href="/api/artifacts/tests?download=true">Download test.py</a>
       <a class="button subtle" href="/api/artifacts/plans?download=true">Download test_plans.json</a>
@@ -768,6 +785,7 @@ function renderFull(result) {
     ${plansTableHTML(plans)}
     ${issues.length ? `<div class="banner warn"><strong>Validation warnings</strong><ul>${issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>` : ""}
     ${warnings.length ? `<div class="banner warn"><ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+    ${llmNoticesHTML(result)}
     ${opts.coverage ? `<h3 class="spaced">Coverage: ${result.coverage_gaps || 0} gap(s), ${result.filled_count || 0} filled</h3>
       <div id="coverage-result"><p class="muted">loading…</p></div>
       <div class="row"><a class="button subtle" href="/api/artifacts/coverage?download=true">Download coverage_report.json</a></div>` : ""}

@@ -30,3 +30,5 @@ avidea-mind-openapi.yaml
 /src/helpers/fixtures/*.jpg
 
 /src/helpers/fixture/*.jpeg
+*.pptx
+*.pdf
