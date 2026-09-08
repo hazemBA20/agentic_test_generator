@@ -32,10 +32,11 @@ FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" 
 
 
 scenario_planner = planner_model().with_structured_output(Scenarios)
-test_builder = gemini_model().with_structured_output(TestPlans)
+
+test_builder = groq_model().with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
-coverage_auditor = gemini_model().with_structured_output(CoverageGaps)
+coverage_auditor = groq_model().with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and

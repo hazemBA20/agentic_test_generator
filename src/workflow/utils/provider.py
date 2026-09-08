@@ -56,14 +56,13 @@ def openrouter_model():
 
 
 def planner_model():
-    """The scenario planner: OpenRouter pinned to Fable, independent of the
-    rewriter's REWRITE_MODEL so retuning the reviewer never moves planning."""
-    return ChatOpenRouter(
-        model=os.getenv("PLANNER_MODEL", "minimax/minimax-m3:free"),
-        temperature=0,
-        max_tokens=8000,
-        reasoning={"effort": "low"},
-    )
+    """The scenario planner: Gemini, independent of the rewriter's
+    REWRITE_MODEL so retuning the reviewer never moves planning.
+
+    Previously OpenRouter (minimax-m3:free); the free slug was retired and the
+    key is exhausted, so planning now shares the proven Gemini structured-
+    output path with the builder/auditor. GOOGLE_MODEL still overrides it."""
+    return gemini_model()
 def sol_model():
     """The failure rewriter, kept on its own provider and quota."""
     return ChatOpenRouter(

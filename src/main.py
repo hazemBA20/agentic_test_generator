@@ -3,6 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from helpers.logging_utils import log_event, new_run_id
 from helpers.parser import ingest_openapi_spec, pretty_print_operations
 from workflow.graph import PartialBuildError, compile_workflow
 
@@ -16,6 +17,7 @@ def main(args) -> int:
         pretty_print_operations(ingest_openapi_spec(args.spec))
         return 0
 
+    run_id = new_run_id()
     workflow = compile_workflow()
     try:
         state = workflow.invoke(
