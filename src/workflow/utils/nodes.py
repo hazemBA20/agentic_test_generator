@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import random
 import re
 import time
@@ -9,9 +8,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openrouter import ChatOpenRouter
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 
 from helpers.coverage import (
     audit_operation, plans_for_operation, required_body_fields, UNREACHABLE_STATUSES,
@@ -28,58 +24,18 @@ from workflow.utils.prompts import (
     COVERAGE_AUDITOR_SYSTEM_PROMPT,
     COVERAGE_AUDITOR_USER_PROMPT,
 )
+from workflow.utils.provider import gemini_model, groq_model, planner_model
 
 load_dotenv()
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-MODEL_NAME = "deepseek/deepseek-v4-flash"
 FIXTURE_DATA_PATH = Path(__file__).resolve().parents[2] / "helpers" / "fixture" / "test_data.json"
 
-model = ChatOpenRouter(
-    model=MODEL_NAME,
-    temperature=0,
-    max_tokens=8000,
-    reasoning =  {"effort": "low"},
-)
 
-
-
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# Overridable so a quota-exhausted model can be swapped without a code edit,
-# the same way rewrite_failed.py takes REWRITE_MODEL.
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.5-flash")
-llm = ChatGoogleGenerativeAI(
-    model=GOOGLE_MODEL,
-     google_api_key=GEMINI_API_KEY,
-    temperature=0.2,
-    max_output_tokens=7900,
-)
-
-
-# Groq — fast OpenAI-compatible inference for open models. The .env key is the
-# lowercase `groq_key`; fall back to the conventional GROQ_API_KEY too. Model is
-# overridable like GOOGLE_MODEL; the default is the strongest general model this
-# key currently serves (run `Groq().models.list()` to see the live lineup — it
-# rotates, and there is no Llama 3.x on it right now).
-GROQ_API_KEY = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-groq_llm = ChatGroq(
-    model=GROQ_MODEL,
-    api_key=GROQ_API_KEY,
-    temperature=0,
-    max_tokens=8000,
-)
-
-
-
-
-
-scenario_planner = llm.with_structured_output(Scenarios)
-test_builder =  groq_llm.with_structured_output(TestPlans)
+scenario_planner = planner_model().with_structured_output(Scenarios)
+test_builder = gemini_model().with_structured_output(TestPlans)
 # Auditing coverage is a judgment task like planning, not payload construction,
 # so it shares the planner's model rather than the builder's.
-coverage_auditor = llm.with_structured_output(CoverageGaps)
+coverage_auditor = gemini_model().with_structured_output(CoverageGaps)
 
 # --- tuning knobs for the builder node -----------------------------------
 # Scenarios per LLM call. Small enough that output can't get truncated and
@@ -196,43 +152,54 @@ def _chunked(items: list, size: int):
         yield items[i:i + size]
 
 
+async def _plan_operation(operation: dict) -> list[ScenarioSpec]:
+    """Plan one operation under the same throttle as the builder."""
+    async def _invoke():
+        op_payload = json.dumps(operation, ensure_ascii=False, default=str)
+        user_content = SCENARIO_PLANNER_USER_PROMPT.format(operation=op_payload)
+        return await scenario_planner.ainvoke(
+            [SystemMessage(content=SCENARIO_PLANNER_SYSTEM_PROMPT), HumanMessage(content=user_content)]
+        )
+
+    async with _semaphore:
+        msg = await _call_with_retry(_invoke)
+    return msg.scenarios
+
+
+async def _plan_all(operations: list[dict]) -> tuple[list[list[ScenarioSpec]], int]:
+    results = await asyncio.gather(
+        *(_plan_operation(operation) for operation in operations),
+        return_exceptions=True,
+    )
+    scenarios_per_operation: list[list[ScenarioSpec]] = []
+    failed = 0
+    for operation, result in zip(operations, results):
+        if isinstance(result, Exception):
+            failed += 1
+            print(
+                f"Planning failed for {operation.get('method', '')} {operation.get('path', '')} "
+                f"after retries: {result}"
+            )
+            scenarios_per_operation.append([])
+            continue
+        scenarios_per_operation.append(result)
+    return scenarios_per_operation, failed
+
+
+def plan_scenarios(operations: list[dict]) -> tuple[list[list[ScenarioSpec]], int]:
+    """Turn operations into per-operation scenarios, and count planning losses."""
+    return _run(_plan_all(operations))
+
+
 def call_llm_1(state: State) -> dict:
     """Planner node: turn each OpenAPI operation into a list of test scenarios."""
     print("Invoking scenario planner LLM...")
-    log_event("planner_started", run_id=state.get("run_id"), stage="planner", operations=len(state["operations"]))
-    operations = state["operations"]
-    scenarios_per_operation = []
-
-    for operation in operations:
-        op_payload = json.dumps(operation, ensure_ascii=False, default=str)
-        user_content = SCENARIO_PLANNER_USER_PROMPT.format(operation=op_payload)
-        try:
-            msg = scenario_planner.invoke(
-                [SystemMessage(content=SCENARIO_PLANNER_SYSTEM_PROMPT), HumanMessage(content=user_content)]
-            )
-            
-            scenarios_per_operation.append(msg.scenarios)
-            log_event(
-                "planner_operation_completed",
-                run_id=state.get("run_id"),
-                stage="planner",
-                operation=operation.get("path"),
-                scenarios=len(msg.scenarios),
-            )
-            print("gotten the scenarios")
-        except Exception as e:
-            log_event(
-                "planner_operation_failed",
-                run_id=state.get("run_id"),
-                stage="planner",
-                operation=operation.get("path"),
-                error=str(e),
-                level=40,
-            )
-            print(f"Error invoking LLM for operation {operation.get('path', '')}: {e}")
-            scenarios_per_operation.append([])
-
-    return {"scenarios": scenarios_per_operation}
+    scenarios_per_operation, failed = plan_scenarios(state["operations"])
+    if failed:
+        print(
+            f"WARNING: {failed} operation(s) produced no scenarios — this suite is incomplete."
+        )
+    return {"scenarios": scenarios_per_operation, "build_failures": failed}
 
 
 def _hollow_reason(plan: TestPlan, required: list[str]) -> str | None:
@@ -294,14 +261,30 @@ async def _build_batch(operation: dict, batch: list[ScenarioSpec]) -> list[TestP
 
 
 async def _build_all(
-    operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]
+    operations: list[dict],
+    scenarios_per_operation: list[list[ScenarioSpec]],
+    progress_cb=None,
 ) -> tuple[list[TestPlan], int]:
-    tasks = [
-        _build_batch(operation, batch)
+    """Build every batch; ``progress_cb(completed, total)`` is best-effort UI
+    feedback (None in terminal use) and never affects the result."""
+    batches = [
+        (operation, batch)
         for operation, scenarios in zip(operations, scenarios_per_operation)
         for batch in _chunked(scenarios, BUILD_BATCH_SIZE)
     ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    total = len(batches)
+    completed = 0
+
+    async def _one(operation: dict, batch: list[ScenarioSpec]):
+        nonlocal completed
+        try:
+            return await _build_batch(operation, batch)
+        finally:
+            completed += 1
+            if progress_cb is not None:
+                progress_cb(completed, total)
+
+    results = await asyncio.gather(*(_one(op, batch) for op, batch in batches), return_exceptions=True)
 
     all_plans = []
     failed_batches = 0
@@ -315,7 +298,9 @@ async def _build_all(
 
 
 def build_plans_with_failures(
-    operations: list[dict], scenarios_per_operation: list[list[ScenarioSpec]]
+    operations: list[dict],
+    scenarios_per_operation: list[list[ScenarioSpec]],
+    progress_cb=None,
 ) -> tuple[list[TestPlan], int]:
     """Build plans, and report how many batches died on the way.
 
@@ -324,7 +309,7 @@ def build_plans_with_failures(
     artifact has to know that before it writes, so the count is returned rather
     than only printed.
     """
-    return _run(_build_all(operations, scenarios_per_operation))
+    return _run(_build_all(operations, scenarios_per_operation, progress_cb))
 
 
 def build_plans(
@@ -343,7 +328,7 @@ def call_llm_2(state: State) -> dict:
     scenarios_per_operation = state.get("scenarios") or []
     if not any(scenarios_per_operation):
         print("No scenarios found in state; skipping test builder.")
-        return {"plans": [], "build_failures": 0}
+        return {"plans": [], "build_failures": state.get("build_failures") or 0}
     print("Invoking test builder LLM...")
 
     planned = sum(len(scenarios) for scenarios in scenarios_per_operation)
@@ -355,15 +340,13 @@ def call_llm_2(state: State) -> dict:
             f"WARNING: {failed_batches} builder batch(es) failed. Built {len(all_plans)} "
             f"plan(s) from {planned} planned scenario(s) — this suite is incomplete."
         )
-    log_event(
-        "builder_completed",
-        run_id=state.get("run_id"),
-        stage="builder",
-        planned=planned,
-        built=len(all_plans),
-        failed_batches=failed_batches,
-    )
-    return {"plans": all_plans, "build_failures": failed_batches}
+
+    # Accumulate rather than overwrite: planner losses already in state must
+    # survive the builder's own count, or persist_plans loses its guarantee.
+    return {
+        "plans": all_plans,
+        "build_failures": (state.get("build_failures") or 0) + failed_batches,
+    }
 
 
 # --- coverage agent -------------------------------------------------------
@@ -592,14 +575,3 @@ def fill_gaps(state: State) -> dict:
         # so persist_plans must know about fill losses before it overwrites.
         "build_failures": (state.get("build_failures") or 0) + failed_batches,
     }
-
-
-# def create_test_file(state:State):
-#     """Write a Python test file with one function per TestPlan."""
-
-#     out_path = state.get("out_path")
-#     from helpers.generate_test_file import generate
-#     plans=state.get("plans", "")
-#     plans_path = Path(out_path).with_suffix(".json")
-#     plans_path.write_text(json.dumps([p.model_dump() for p in plans], indent=2, default=str), encoding="utf-8")
-#     generate(plans_path, Path(out_path))

@@ -1,4 +1,9 @@
 {
   "expert_code": "HAZEM_EXPERT",
-  "missionReference": "008/26"
+  "missionReference": "008/26",
+  "requestid": 123,
+  "missiontype": "NORMAL_EXPERTISE",
+  "expertcode": "HAZEM_EXPERT",
+  "documenttype": "QUOTE",
+  "data": "testtesttesttesttest"
 }

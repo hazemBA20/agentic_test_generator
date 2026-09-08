@@ -31,6 +31,13 @@ load_dotenv()
 REWRITEABLE = {"body", "status"}
 INFRA_STATUSES = {401, 403, 500, 502, 503}
 REWRITE_BATCH_SIZE = 4
+# Response-assertion sentinels (see _test_support.py). In a request field they
+# would be sent to the server as literal strings. <FILE:>, <FIXTURE:>, and
+# <ENV:> are legitimate request-side sentinels and are resolved by the runner.
+REQUEST_FORBIDDEN_SENTINELS = (
+    "<GENERATED>", "<PRESENT>", "<NON_NULL>", "<ANY_STRING>", "<ANY_INTEGER>",
+    "<ANY_NUMBER>", "<ANY_BOOLEAN>", "<ANY_OBJECT>", "<ANY_ARRAY>",
+)
 
 SYSTEM_PROMPT = """You repair generated API test plans that failed against a live server.
 
@@ -140,6 +147,23 @@ def _log(entries: list[dict], **entry) -> None:
     entries.append(entry)
 
 
+def _sentinel_in_value(value) -> str | None:
+    """The first response-assertion sentinel appearing anywhere in a patch value."""
+    if isinstance(value, str):
+        return next((s for s in REQUEST_FORBIDDEN_SENTINELS if s in value), None)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found = _sentinel_in_value(key) or _sentinel_in_value(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _sentinel_in_value(item)
+            if found:
+                return found
+    return None
+
+
 def _apply(plan: dict, patch: NamedPatch, kind: str) -> str | None:
     """Apply the field this kind is allowed to change. Return skip reason or None."""
     if kind == "body":
@@ -160,6 +184,12 @@ def _apply(plan: dict, patch: NamedPatch, kind: str) -> str | None:
         field, value = supplied[0]
         if field == "headers" and any(str(key).lower() == "x-api-key" for key in value):
             return "status patch attempted to replace X-API-KEY"
+        sentinel = _sentinel_in_value(value)
+        if sentinel:
+            return (
+                f"status patch put the response-assertion sentinel {sentinel} into "
+                f"{field}; the runner would send it to the server as a literal string"
+            )
         plan[field] = value
         return None
     return f"kind={kind} is not auto-fixed"
