@@ -61,6 +61,7 @@ class CoverageGaps(BaseModel):
 
 
 class State(TypedDict, total=False):
+    run_id: str
     operations: list[dict]
     scenarios: list[list[ScenarioSpec]]
     plans: list[TestPlan | dict[str, Any]]

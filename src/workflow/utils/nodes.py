@@ -15,6 +15,7 @@ from helpers.coverage import (
 from workflow.utils.models import (
     State, ScenarioSpec, Scenarios, TestPlan, TestPlans, CoverageGaps,
 )
+from helpers.logging_utils import log_event
 from workflow.utils.prompts import (
     SCENARIO_PLANNER_SYSTEM_PROMPT,
     SCENARIO_PLANNER_USER_PROMPT,
@@ -136,6 +137,12 @@ async def _call_with_retry(coro_fn):
             if attempt == MAX_RETRIES - 1 or not _is_retryable(e):
                 raise
             backoff = min(30, 2 ** attempt) + random.uniform(0, 1)
+            log_event(
+                "llm_retry",
+                stage="llm",
+                attempt=attempt + 1,
+                error=str(e),
+            )
             print(f"Retryable error ({e}); backing off {backoff:.1f}s (attempt {attempt + 1}/{MAX_RETRIES})")
             await asyncio.sleep(backoff)
 

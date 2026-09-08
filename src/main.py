@@ -20,6 +20,7 @@ def main(args) -> int:
     try:
         state = workflow.invoke(
             {
+                "run_id": run_id,
                 "spec_path": args.spec,
                 "operation_index": args.index,
                 "run_all": args.all,
@@ -37,10 +38,19 @@ def main(args) -> int:
             }
         )
     except PartialBuildError as e:
+        log_event("workflow_failed", run_id=run_id, stage="persist", error=str(e), level=40)
         print(f"ERROR: {e}")
         return 2
 
     exit_code = 0
+    log_event(
+        "workflow_completed",
+        run_id=run_id,
+        stage="workflow",
+        plans=len(state.get("plans") or []),
+        build_failures=state.get("build_failures", 0),
+        review_errors=state.get("review_errors", 0),
+    )
     print(f"Generated test suite: {state['tests_path']}")
     if state.get("build_failures"):
         print(
